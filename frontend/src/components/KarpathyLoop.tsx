@@ -48,6 +48,8 @@ export default function KarpathyLoop() {
   const [results, setResults] = useState<ExperimentResult | null>(null)
   const [newModelName, setNewModelName] = useState('')
   const [showNameModel, setShowNameModel] = useState(false)
+  const [sampleSize, setSampleSize] = useState(100)
+  const [numLoops, setNumLoops] = useState(10)
 
   useEffect(() => {
     loadGoldenData()
