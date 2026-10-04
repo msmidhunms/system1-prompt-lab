@@ -4,33 +4,27 @@ Every route works on one example (a task from app.tasks.registry), named by `tas
 the query string or the request body. Leaving it out means the search-intent example.
 """
 
-import random
 import uuid
-from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app import golden, karpathy_loop, llm, scoring, serp
+from app import evaluations, golden, karpathy_loop, llm, scoring, serp, versions
 from app.config import DEFAULT_TASK_ID
-from app.database import EvaluationRun, FeedbackRecord, GoldenRow, ModelVersion, PredictionRecord, get_db
+from app.database import EvaluationRun, FeedbackRecord, GoldenRow, PredictionRecord, get_db
 from app.inference import classify_intent
-from app.laya_inference import (
-    BASELINE_VERSION,
-    LAYA_MODELS,
-    checkpoint_path,
-    load_version_config,
-    predict_batch,
-    save_checkpoint,
-)
+from app.laya_inference import LAYA_MODELS, predict_batch
 from app.tasks import sources
 from app.tasks.registry import TASKS, Task, get_task
+from app.versions import BASELINE_VERSION
 
 router = APIRouter(prefix="/api", tags=["api"])
 
-TOP_ERRORS = 10
+# Evaluations left running by a previous server process can no longer finish.
+evaluations.mark_interrupted()
 
 
 def _task(task_id: Optional[str]) -> Task:
@@ -76,6 +70,8 @@ class GoldenRowUpdate(BaseModel):
 
 
 class ImportRequest(BaseModel):
+    # The examples to import. Empty means every example that has no golden data yet.
+    tasks: List[str] = []
     rows: int = sources.DEFAULT_ROWS
     seed: int = sources.DEFAULT_SEED
     refresh: bool = False
@@ -96,6 +92,21 @@ class KarpathyLoopRequest(BaseModel):
 class SaveModelRequest(BaseModel):
     model_name: str
     run_id: str
+    # The round whose prompt to save. Left out, the run's best prompt is saved.
+    iteration: Optional[int] = None
+    description: Optional[str] = None
+
+
+class CreateModelRequest(BaseModel):
+    task: str = DEFAULT_TASK_ID
+    name: str
+    config: Dict[str, Any]
+    base_version: Optional[str] = None
+    description: Optional[str] = None
+
+
+class UpdateModelRequest(BaseModel):
+    name: Optional[str] = None
     description: Optional[str] = None
 
 
@@ -121,31 +132,63 @@ class LLMProviderRequest(BaseModel):
 
 # ---------------------------------------------------------------- examples
 
+def _golden_counts(db: Session) -> Dict[str, int]:
+    return dict(db.query(GoldenRow.task_id, func.count(GoldenRow.id)).group_by(GoldenRow.task_id).all())
+
+
 @router.get("/tasks")
 def list_tasks(db: Session = Depends(get_db)):
-    """The examples that can be selected, with their labels and how much golden data each has."""
+    """The examples that can be selected, with their labels, how much golden data each has and how to get it."""
+    counts = _golden_counts(db)
     tasks = []
     for task in TASKS.values():
         info = task.public()
-        info["golden_rows"] = db.query(GoldenRow).filter(GoldenRow.task_id == task.id).count()
+        info["golden_rows"] = counts.get(task.id, 0)
         info["importable"] = sources.importable(task)
+        info["import_status"] = sources.import_status(task.id)
+        info["setup_hint"] = sources.setup_hint(task)
+        info["max_criterion_words"] = task.max_criterion_words
+        info["max_instruction_words"] = task.max_instruction_words
         tasks.append(info)
     return {"default": DEFAULT_TASK_ID, "tasks": tasks}
 
 
-@router.post("/tasks/{task_id}/import")
-def import_task_dataset(task_id: str, request: Optional[ImportRequest] = None, db: Session = Depends(get_db)):
-    """Download the example's public dataset (or reuse its snapshot on disk) and add it to the golden dataset."""
-    task = _task(task_id)
+@router.post("/setup/import")
+def import_datasets(request: Optional[ImportRequest] = None, db: Session = Depends(get_db)):
+    """Download and import examples' datasets in the background. GET /tasks reports each one's import_status."""
     request = request or ImportRequest()
     if not 10 <= request.rows <= 20000:
         raise HTTPException(status_code=400, detail="Rows must be between 10 and 20000")
-    try:
-        return sources.import_task(db, task, rows=request.rows, seed=request.seed, refresh=request.refresh)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:  # noqa: BLE001 - a failed download must reach the user as a message
-        raise HTTPException(status_code=502, detail=f"Could not import the dataset: {e}")
+    if request.tasks:
+        tasks = [_task(task_id) for task_id in request.tasks]
+        missing = [task.name for task in tasks if not sources.importable(task)]
+        if missing:
+            raise HTTPException(status_code=400, detail=f"No dataset to import for: {', '.join(missing)}")
+    else:
+        counts = _golden_counts(db)
+        tasks = [task for task in TASKS.values() if sources.importable(task) and not counts.get(task.id)]
+    return {"queued": sources.start_import(tasks, rows=request.rows, seed=request.seed, refresh=request.refresh)}
+
+
+@router.get("/activity")
+def get_activity(db: Session = Depends(get_db)):
+    """Everything that is running in the background, across all examples."""
+    run = karpathy_loop.active_run()
+    loop = None
+    if run:
+        state = karpathy_loop.get_run(run["run_id"])
+        loop = {
+            "run_id": run["run_id"],
+            "task": run["task"],
+            "phase": state["phase"],
+            "rounds_done": len(state["iterations"]),
+            "rounds": state["loops"],
+        }
+    return {
+        "loop": loop,
+        "evaluations": evaluations.running(db),
+        "imports": [{"task": task_id, **(sources.import_status(task_id) or {})} for task_id in sources.importing()],
+    }
 
 
 # ---------------------------------------------------------------- try it
@@ -159,7 +202,7 @@ def predict(request: PredictRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=f"{task.input_label} cannot be empty")
 
     try:
-        config = load_version_config(request.version, task)
+        config = versions.load_config(request.version, task)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     try:
@@ -342,7 +385,7 @@ def start_karpathy_loop(request: KarpathyLoopRequest, db: Session = Depends(get_
         )
 
     try:
-        start_config = load_version_config(request.start_version, task)
+        start_config = versions.load_config(request.start_version, task)
         llm_config = llm.resolve_config(db)
     except (ValueError, llm.LLMError) as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -396,11 +439,13 @@ def list_karpathy_runs(task: Optional[str] = None):
 
 
 @router.get("/karpathy-loop/runs/{run_id}")
-def get_karpathy_run(run_id: str):
+def get_karpathy_run(run_id: str, db: Session = Depends(get_db)):
     """Get the full state of a run: baseline, every iteration, best config, holdout scores, log."""
     run = karpathy_loop.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
+    # Looked up by run, not taken from the run's own record, so a renamed version shows its current name.
+    run["saved_versions"] = versions.of_run(db, run_id)
     return run
 
 
@@ -453,7 +498,10 @@ def list_llm_models(request: LLMProviderRequest, db: Session = Depends(get_db)):
     """List the models the provider serves, using the saved settings."""
     try:
         config = llm.resolve_config(db, request.provider)
-        return {"models": llm.list_models(config)}
+        models = llm.list_models(config)
+        # Kept with the provider's settings, so the list is still there after a reload.
+        llm.update_config(db, config["provider"], models=models, make_active=False)
+        return {"models": models}
     except llm.LLMError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -463,198 +511,99 @@ def list_llm_models(request: LLMProviderRequest, db: Session = Depends(get_db)):
 @router.get("/models")
 def list_models(task: str = DEFAULT_TASK_ID, db: Session = Depends(get_db)):
     """List the example's baseline plus every model version saved for it."""
-    task_ = _task(task)
-    saved = (
-        db.query(ModelVersion).filter(ModelVersion.task_id == task_.id)
-        .order_by(ModelVersion.created_at.desc()).all()
-    )
-    versions = [{
-        "version": BASELINE_VERSION,
-        "accuracy": None,
-        "base_version": None,
-        "description": "Default Laya prompt",
-        "created_at": None,
-        "config": task_.default_config,
-    }]
-    for model in saved:
-        try:
-            config = load_version_config(model.version, task_)
-        except ValueError:
-            continue  # row without a checkpoint file (saved before prompts were stored)
-        versions.append({
-            "version": model.version,
-            "accuracy": model.accuracy,
-            "base_version": model.base_version,
-            "description": model.description,
-            "created_at": model.created_at.isoformat() if model.created_at else None,
-            "config": config,
-        })
-    return versions
+    return versions.list_versions(db, _task(task))
+
+
+@router.post("/models")
+def create_model(request: CreateModelRequest, db: Session = Depends(get_db)):
+    """Save a prompt config as a new model version, e.g. an edited copy of another version."""
+    try:
+        return versions.create(
+            db, _task(request.task), request.name, request.config, source="manual",
+            base_version=request.base_version, description=request.description,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.patch("/models/{name}")
+def update_model(name: str, request: UpdateModelRequest, db: Session = Depends(get_db)):
+    """Rename a model version or change its description."""
+    try:
+        result = None
+        if request.description is not None:
+            result = versions.set_description(db, name, request.description)
+        if request.name is not None and request.name.strip() != name:
+            result = versions.rename(db, name, request.name)
+        if result is None:
+            raise ValueError("Nothing to change")
+        return result
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/models/{name}")
+def delete_model(name: str, db: Session = Depends(get_db)):
+    try:
+        versions.delete(db, name)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "deleted", "version": name}
 
 
 @router.post("/save-model")
 def save_model(request: SaveModelRequest, db: Session = Depends(get_db)):
-    """Save the best prompt found by a Karpathy loop run as a named model version of the run's example."""
-    model_name = request.model_name.strip()
-
-    if not model_name:
-        raise HTTPException(status_code=400, detail="Model name cannot be empty")
-
+    """Save a prompt from an optimizer run as a named model version: its best, or the one a given round proposed."""
     run = karpathy_loop.get_run(request.run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-
-    if run["status"] == "running":
-        raise HTTPException(status_code=400, detail="Run is still in progress")
-
-    if run["best_accuracy"] is None:
-        raise HTTPException(status_code=400, detail="Run has no evaluated config to save")
-
     try:
-        path = checkpoint_path(model_name)
+        saved = versions.save_from_run(
+            db, _task(run["task"]), run, request.model_name,
+            iteration=request.iteration, description=request.description,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-    # Version names are unique across examples: each is one file under autoresearch/checkpoints/.
-    existing = db.query(ModelVersion).filter(
-        ModelVersion.version == model_name
-    ).first()
-
-    if existing or path.exists() or model_name == BASELINE_VERSION:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Model version '{model_name}' already exists"
-        )
-
-    save_checkpoint(model_name, {
-        "version": model_name,
-        "task": run["task"],
-        "config": run["best_config"],
-        "run_id": run["run_id"],
-        "best_iteration": run["best_iteration"],
-        "base_version": run["start_version"],
-        "dev_accuracy": run["best_accuracy"],
-        "dev_macro_f1": run.get("best_macro_f1"),
-        "holdout_accuracy": run["holdout"]["best"]["accuracy"] if run.get("holdout") else None,
-        "llm": run["llm"],
-        "saved_at": datetime.utcnow().isoformat(),
-    })
-
-    model = ModelVersion(
-        id=str(uuid.uuid4()),
-        task_id=run["task"],
-        model_name="laya",
-        version=model_name,
-        accuracy=run["best_accuracy"],
-        base_version=run["start_version"],
-        description=request.description,
-    )
-    db.add(model)
-    db.commit()
-
-    return {
-        "model_id": model.id,
-        "model_name": model_name,
-        "accuracy": run["best_accuracy"],
-        "status": "saved"
-    }
+    return {**saved, "model_name": saved["version"], "status": "saved"}
 
 
 # ---------------------------------------------------------------- evaluation
 
 @router.post("/evaluate")
 def run_evaluation(request: Optional[EvaluateRequest] = None, db: Session = Depends(get_db)):
-    """Score a model version on a seeded sample of the example's golden dataset, and save the result."""
+    """Start scoring a model version on a seeded sample of the example's golden dataset.
+
+    Returns at once with the evaluation's id and status "running". GET /evaluations/{id}
+    reports progress and, when it has completed, the full result.
+    """
     request = request or EvaluateRequest()
     task = _task(request.task)
-
     if request.sample_size < 10 or request.sample_size > 10000:
         raise HTTPException(status_code=400, detail="Sample size must be between 10 and 10000")
-
-    examples = golden.examples_for(db, task)
-    if not examples:
-        in_language = f" in language '{task.language}'" if task.language else ""
-        raise HTTPException(
-            status_code=400,
-            detail=f"No golden {task.items}{in_language} for this example. Import the dataset in the Golden Dataset tab."
-        )
-    # A seeded shuffle, not the first rows: imported datasets are not stored in random order.
-    examples.sort(key=lambda e: e["text"])
-    random.Random(request.seed).shuffle(examples)
-    sample = examples[:request.sample_size]
-
     try:
-        config = load_version_config(request.version, task)
+        return evaluations.start(db, task, request.version, request.sample_size, request.seed, request.model)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    # The version's own label bias (if it has one) is applied as saved; nothing is fitted here.
-    _, metrics = scoring.evaluate(config, sample, task, "balanced", fit_bias=False)
-
-    errors = sorted((c for c in metrics["cases"] if not c["correct"]), key=lambda c: c["confidence"], reverse=True)
-    stats = golden.stats(db, task)
-    created_at = datetime.utcnow()
-    result = {
-        "eval_id": str(uuid.uuid4()),
-        "task": task.id,
-        "labels": list(task.labels),
-        "model": request.model,
-        "version": request.version,
-        "seed": request.seed,
-        "total_cases": metrics["total"],
-        "accuracy": metrics["accuracy"],
-        "macro_f1": metrics["macro_f1"],
-        "per_class_metrics": metrics["per_class"],
-        # confusion_matrix[actual][predicted]
-        "confusion_matrix": metrics["confusion"],
-        "predicted_counts": metrics["predicted_counts"],
-        "error_count": len(errors),
-        "error_rate": round(len(errors) / metrics["total"], 4),
-        "top_errors": errors[:TOP_ERRORS],
-        "timestamp": created_at.isoformat(),
-        "sample_size": metrics["total"],
-        "total_golden_data": stats["usable"],
-        "eval_language": task.language,
-        "excluded_other_language": stats["excluded_other_language"],
-    }
-    db.add(EvaluationRun(
-        id=result["eval_id"],
-        task_id=task.id,
-        model=request.model,
-        version=request.version,
-        sample_size=metrics["total"],
-        total_cases=metrics["total"],
-        accuracy=metrics["accuracy"],
-        macro_f1=metrics["macro_f1"],
-        result=result,
-        created_at=created_at,
-    ))
-    db.commit()
-    return result
 
 
 @router.get("/evaluations")
 def list_evaluations(task: str = DEFAULT_TASK_ID, limit: int = 100, db: Session = Depends(get_db)):
-    """The example's saved evaluations, newest first."""
+    """The example's evaluations, newest first, including any still running."""
     runs = (
         db.query(EvaluationRun).filter(EvaluationRun.task_id == _task(task).id)
         .order_by(EvaluationRun.created_at.desc()).limit(max(1, min(limit, 500))).all()
     )
-    return [{
-        "eval_id": run.id,
-        "task": run.task_id,
-        "model": run.model,
-        "version": run.version,
-        "sample_size": run.sample_size,
-        "accuracy": run.accuracy,
-        "macro_f1": run.macro_f1,
-        "timestamp": run.created_at.isoformat() if run.created_at else None,
-    } for run in runs]
+    return [evaluations.summary(run) for run in runs]
 
 
 @router.get("/evaluations/{eval_id}")
 def get_evaluation(eval_id: str, db: Session = Depends(get_db)):
-    """The full result of one saved evaluation."""
+    """One evaluation: its status and progress, and the full result once it has completed."""
     run = db.query(EvaluationRun).filter(EvaluationRun.id == eval_id).first()
     if run is None:
         raise HTTPException(status_code=404, detail="Evaluation not found")
-    return run.result
+    return evaluations.detail(run)
