@@ -241,6 +241,14 @@
   background: rgba(100, 108, 255, 0.05);
 }
 
+.history-table tbody tr {
+  cursor: pointer;
+}
+
+.history-table tbody tr.selected {
+  background: rgba(100, 108, 255, 0.15);
+}
+
 .intent-badge {
   display: inline-block;
   padding: 0.4rem 0.8rem;
