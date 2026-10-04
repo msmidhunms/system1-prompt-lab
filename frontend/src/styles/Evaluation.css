@@ -47,7 +47,8 @@
   font-weight: 600;
 }
 
-.control-group select {
+.control-group select,
+.control-group input[type="number"] {
   padding: 0.6rem 0.75rem;
   border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 6px;
@@ -57,14 +58,21 @@
   cursor: pointer;
 }
 
-.control-group select:focus {
+.control-group select:focus,
+.control-group input[type="number"]:focus {
   outline: none;
   border-color: #646cff;
 }
 
-.control-group select:disabled {
+.control-group select:disabled,
+.control-group input[type="number"]:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.control-group input[type="number"] {
+  cursor: text;
+  width: 100px;
 }
 
 .analyze-btn {
