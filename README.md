@@ -41,6 +41,32 @@ Search intent is the exception: its data (`data/test_db.json`) is not in the rep
 
 Nothing else is example-specific: inference, scoring, the loop, the API and the UI all read the registry.
 
+## Models
+
+Every example can be run on seven models. Laya is the default; the others are open zero-shot classifiers that take the same prompt (the input, a question, one description per label) in their own input format (`backend/app/engines.py`).
+
+| Model | Size | How it reads the prompt |
+|---|---|---|
+| Laya | – | Native: JSON state, instructions, option descriptions; yes/no questions as `noul` |
+| GLiClass modern-base v2.0 (`knowledgator/gliclass-modern-base-v2.0`) | 151M | All descriptions and the text in one pass; the instructions go before the text |
+| Verdict 1.4 / OpenJev (`heman10x/rlcd-modernbert-151m`) | 151M | GLiClass backbone; each description becomes "It is …", the instructions become "Question: …", and the model's own temperature calibration and abstention option are applied |
+| DeBERTa-v3 xsmall zero-shot v1.1 (`MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33`) | 70.8M | NLI: one pass per label; instructions containing `{}` are the hypothesis template, otherwise "This text is about {}." |
+| DeBERTa small long NLI (`tasksource/deberta-small-long-nli`) | 142M | NLI, as above |
+| DeBERTa-v3 large zero-shot v2.0 (`MoritzLaurer/deberta-v3-large-zeroshot-v2.0`) | 435M | NLI, as above |
+| ModernBERT-Large-Instruct (`answerdotai/ModernBERT-Large-Instruct`) | 396M | A multiple-choice prompt answered by the masked-language head |
+
+A model's weights are downloaded from Hugging Face the first time it is used, and only one of the six non-Laya models is kept in memory at a time. They run on the CPU unless `ENGINE_DEVICE` says otherwise.
+
+A model version is saved for one model. The Playground, Evaluation and the Prompt Optimizer can each run a version's prompt on another model; a label bias or Laya checkpoint does not carry over when they do. The optimizer is told how the chosen model reads a prompt, so it can be used to tune a prompt for any of the seven.
+
+The **Compare Models** tab runs one prompt on several models over the same sample and shows accuracy, macro-F1 and time per input side by side.
+
+```bash
+curl -X POST localhost:8000/api/compare -H 'Content-Type: application/json' \
+  -d '{"task": "support_routing", "version": "v1_baseline", "engines": ["laya", "gliclass", "verdict"], "sample_size": 100}'
+curl 'localhost:8000/api/comparisons?task=support_routing'
+```
+
 ## Architecture
 
 ```
@@ -56,6 +82,7 @@ backend/                  Python FastAPI + SQLite (backend/data.db)
       sources.py          Dataset loaders and the (background) import
       intent/             Search-intent label enum and schemas
     laya_inference.py     Prompt configs and Laya calls
+    engines.py            The other models: GLiClass, Verdict, NLI classifiers, ModernBERT-Instruct
     versions.py           Saved model versions: create, rename, delete, auto-save
     scoring.py            Accuracy, macro-F1, label-bias fit, paired bootstrap
     evaluations.py        Evaluations as background jobs
@@ -88,12 +115,13 @@ autoresearch/
   results.tsv             One line per experiment
 ```
 
-## The five tabs
+## The six tabs
 
 - **Playground**: classify one input with any model version and mark the prediction right or wrong. Feedback that settles the label is written to the golden dataset.
 - **Dataset**: browse, search, filter, edit and delete the example's labelled rows, and add new ones.
 - **Models**: the example's prompt versions. View a prompt, duplicate and edit it into a new version, rename, delete, or send it to Evaluation or the Playground.
 - **Evaluation**: score a version on a seeded random sample of the golden dataset. Every evaluation is saved and listed.
+- **Compare Models**: one prompt, the same sample, several models side by side.
 - **Prompt Optimizer**: run the prompt autoresearch loop and open past runs.
 
 Evaluations, optimizer runs and dataset imports run on the server. You can switch tab or example, or reload the page, and find them where they were; the header shows what is running. The place in the app is kept in the URL (`#/support_routing/optimizer`).
@@ -294,6 +322,8 @@ Every endpoint takes the example as `task` (query parameter on GET, body field o
 | `POST /api/golden-data` | Add a row, or update the row with the same input |
 | `PUT /api/golden-data/{id}`, `DELETE /api/golden-data/{id}` | Edit or delete a row |
 | `POST /api/evaluate` | Start an evaluation in the background |
+| `GET /api/engines` | The models an example can be run on |
+| `POST /api/compare`, `GET /api/comparisons` | Evaluate one prompt on several models; past comparisons |
 | `GET /api/evaluations`, `GET /api/evaluations/{id}` | Evaluations with status and progress; the full result once completed |
 | `POST /api/karpathy-loop` | Start a loop |
 | `GET /api/karpathy-loop/runs`, `GET /api/karpathy-loop/runs/{id}` | Past and current runs |
