@@ -7,7 +7,9 @@ interface Keyword {
   keyword: string
   main_intent: string
   secondary_intents: string[]
+  language: string | null
   confidence: number
+  model: string
   created_at: string
 }
 
@@ -171,6 +173,7 @@ export default function KeywordAnalysis() {
                   <th>Keyword</th>
                   <th>Main Intent</th>
                   <th>Secondary Intents</th>
+                  <th>Language</th>
                   <th>Confidence</th>
                   <th>Model</th>
                 </tr>
@@ -210,6 +213,7 @@ export default function KeywordAnalysis() {
                         )}
                       </div>
                     </td>
+                    <td className="model-cell">{kw.language ?? '-'}</td>
                     <td>
                       <span className="confidence">
                         {(kw.confidence * 100).toFixed(0)}%

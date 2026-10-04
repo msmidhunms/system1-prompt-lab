@@ -12,6 +12,9 @@ interface GoldenDataStats {
   user_feedback_count: number
   unique_feedback_queries: number
   total_golden_data: number
+  eval_language?: string
+  eval_language_data?: number
+  other_language_data?: number
 }
 
 interface PromptConfig {
@@ -64,6 +67,8 @@ interface Run {
   calibrate?: boolean
   use_serp?: boolean
   laya_model?: string
+  language?: string
+  excluded_other_language?: number
   keep_confidence?: number
   dev_size: number
   holdout_size: number
@@ -328,6 +333,12 @@ export default function KarpathyLoop() {
               <span className="stat-value">{stats.total_golden_data}</span>
             </div>
           </div>
+          {stats.eval_language_data != null && (
+            <p className="control-hint">
+              Only the {stats.eval_language_data} queries in language "{stats.eval_language}" are used for the loop and
+              for evaluation. {stats.other_language_data} in other languages are left out.
+            </p>
+          )}
         </div>
 
         <LLMSettings disabled={running} onActiveChange={setActiveLLM} />
@@ -440,6 +451,7 @@ export default function KarpathyLoop() {
             {run.laya_model ? ` · Laya ${run.laya_model}` : ''} · objective: {objectiveLabel}
             {run.calibrate ? ' · calibrated' : ''}
             {run.use_serp ? ' · SERP context allowed' : ''} · {run.dev_size} dev / {run.holdout_size} holdout queries
+            {run.language ? ` · ${run.language} only` : ''}
           </p>
 
           {running && (

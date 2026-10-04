@@ -37,6 +37,8 @@ interface EvaluationResult {
   timestamp: string
   sample_size?: number
   total_golden_data?: number
+  eval_language?: string
+  excluded_other_language?: number
 }
 
 const INTENT_COLORS: Record<string, string> = {
@@ -390,6 +392,12 @@ export default function Evaluation() {
               <p>
                 <strong>Sample Size:</strong> {result.sample_size} / {result.total_golden_data}
               </p>
+              {result.eval_language && (
+                <p>
+                  <strong>Language:</strong> {result.eval_language} only ({result.excluded_other_language} golden
+                  queries in other languages excluded)
+                </p>
+              )}
               <p>
                 <strong>Evaluated:</strong> {new Date(result.timestamp).toLocaleString()}
               </p>
