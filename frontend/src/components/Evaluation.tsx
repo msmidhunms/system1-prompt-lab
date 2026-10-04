@@ -47,6 +47,7 @@ const INTENT_COLORS: Record<string, string> = {
 export default function Evaluation() {
   const [model, setModel] = useState('laya')
   const [version, setVersion] = useState('v1_baseline')
+  const [sampleSize, setSampleSize] = useState(100)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<EvaluationResult | null>(null)
@@ -60,6 +61,10 @@ export default function Evaluation() {
       const response = await axios.post('http://localhost:8000/api/evaluate', {
         model,
         version,
+      }, {
+        params: {
+          sample_size: sampleSize,
+        }
       })
       setResult(response.data)
     } catch (err) {
