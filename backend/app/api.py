@@ -11,6 +11,7 @@ import json
 from app.database import get_db, PredictionRecord, FeedbackRecord, ModelVersion, ExperimentRun
 from app.tasks.intent.labels import SearchIntent
 from app.inference import classify_intent, classify_intent_v2
+from app.laya_inference import classify_with_laya, create_improved_questions
 
 router = APIRouter(prefix="/api", tags=["api"])
 
