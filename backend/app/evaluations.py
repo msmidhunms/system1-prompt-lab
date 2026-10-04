@@ -54,7 +54,7 @@ def summary(run: EvaluationRun) -> Dict[str, Any]:
         "accuracy": run.accuracy if done else None,
         "macro_f1": run.macro_f1 if done else None,
         "seconds": run.seconds,
-        "ms_per_item": round(run.seconds * 1000 / run.sample_size, 1) if done and run.seconds and run.sample_size else None,
+        "ms_per_item": round(run.seconds * 1000 / run.sample_size, 1) if done and run.seconds is not None and run.sample_size else None,
         "comparison_id": run.comparison_id,
         "timestamp": run.created_at.isoformat() if run.created_at else None,
     }
@@ -174,7 +174,7 @@ def _run(eval_id: str, task: Task, config: Dict[str, Any], sample: List[Dict[str
         run.accuracy = metrics["accuracy"]
         run.macro_f1 = metrics["macro_f1"]
         run.progress_done = metrics["total"]
-        run.seconds = round(seconds, 2)
+        run.seconds = round(seconds, 3)
         run.status = "completed"
         db.commit()
     except Exception as e:  # noqa: BLE001 - a failed evaluation must be recorded, not lost with the thread
