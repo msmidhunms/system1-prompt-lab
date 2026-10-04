@@ -112,14 +112,31 @@ For each (model, version, test_set) triple, compute:
 Store in SQLite with git commit SHA for reproducibility.
 
 ### Karpathy Autoresearch Loop
-An agent (run separately, configured in `autoresearch/program.md`) iteratively:
-1. Edits the current classifier file (e.g., v1_baseline.py).
-2. Runs eval.
-3. If accuracy on dev set improves → git commit, advance.
-4. Else → git revert, try again.
-5. Never sees holdout set (10% reserved for honest final metrics).
+Modelled on [karpathy/autoresearch](https://github.com/karpathy/autoresearch), but the thing being edited is the **prompt Laya is given**, not code. A prompt config has three editable parts (`backend/app/laya_inference.py`):
 
-Logs each iteration to `autoresearch/results.tsv`.
+- `state_template`: how the query is rendered into the state passed to `Router.predict`.
+- `instructions`: the question text.
+- `criteria`: one description per intent label (the labels themselves are fixed).
+
+Each round (`backend/app/karpathy_loop.py`):
+1. An LLM is shown the current best config, its dev metrics, the confusion matrix, a sample of misclassified queries and the experiment history, and proposes a new config.
+2. Laya is run with that config on the dev set.
+3. Dev accuracy higher than the best so far → **keep**. Otherwise → **discard**. An unusable LLM reply is a **crash**.
+4. The holdout set (`EVAL_HOLDOUT_RATIO` of the golden data, never shown to the LLM) is scored once at the end for the baseline and the best config.
+
+Laya keeps only the first 48 tokens of each label description, so the LLM is told to keep them short.
+
+Every run writes to `autoresearch/runs/<run_id>/` (gitignored):
+
+- `run.json` / `run.log`: live run state and log.
+- `iter_000_baseline.json`, `iter_NNN.json`: config, metrics, per-query results and the raw LLM reply for each round.
+- `iter_NNN_prompt.txt`: the exact prompt sent to the LLM.
+- `best_config.json`, `holdout_results.json`, `dev_set.json`, `holdout_set.json`.
+
+One line per experiment is also appended to `autoresearch/results.tsv`. Saving a run's best prompt from the UI writes `autoresearch/checkpoints/<name>.json`; that name can then be used as `version` in `/api/predict` and `/api/evaluate`, or as the starting point of the next run.
+
+### LLM Configuration
+The LLM is chosen on the Karpathy Loop page and stored in the local SQLite DB (`backend/app/llm.py`). Supported: Claude (Anthropic API), OpenAI, Ollama, Google Gemini, any OpenAI-compatible endpoint (OpenRouter, Groq, LM Studio, vLLM, ...), and the Claude Code and Codex CLIs (which use their own login, no API key). API keys can be entered in the UI or supplied through `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` in the backend environment.
 
 ### Cross-Model Comparison
 Eval can be run for any (model, version) combination. Frontend compare page groups results by model OR version, showing:
@@ -211,19 +228,18 @@ Frontend → **Compare** page → Select version "v1_baseline" → See accuracy,
 
 ### 5. Karpathy Loop (Autoresearch)
 
-Once you've created at least 2 classifier versions (e.g., v1_baseline, v2_improved), run:
+1. Open frontend → **Karpathy Loop** page.
+2. Pick the LLM provider and model, then **Save and test**.
+3. Set the dev set size, the number of rounds and the version to start from, then start the loop.
+4. Watch each round arrive as keep / discard / crash. Click a round to see the prompt it proposed.
+5. When the run ends, compare dev and holdout accuracy and save the best prompt as a named version.
 
+**API alternative**:
 ```bash
-cd autoresearch
-python loop.py --model laya --version v1_baseline --iterations 10 --eval-budget 10
+curl -X POST localhost:8000/api/karpathy-loop -H 'Content-Type: application/json' \
+  -d '{"loops": 10, "sample_size": 200, "start_version": "v1_baseline"}'
+curl localhost:8000/api/karpathy-loop/runs/<run_id>
 ```
-
-The loop:
-- Edits classifier file.
-- Runs eval on **dev set only** (90% of data).
-- Keeps edits if dev accuracy improves.
-- Logs results to `results.tsv`.
-- Reports holdout (10%) accuracy at the end.
 
 ## Project Structure in Detail
 
