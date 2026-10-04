@@ -1,6 +1,6 @@
 """Database setup and models."""
 
-from sqlalchemy import create_engine, Column, String, Float, Integer, DateTime, Text, Boolean, JSON
+from sqlalchemy import create_engine, inspect, text, Column, String, Float, Integer, DateTime, Text, Boolean, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
@@ -23,6 +23,7 @@ class PredictionRecord(Base):
     query = Column(String, nullable=False, index=True)
     predicted_intent = Column(String, nullable=False)
     secondary_intents = Column(JSON, nullable=True)  # Store list of secondary intents
+    language = Column(String, nullable=True, index=True)  # Language of the query wording (e.g. 'en'); None if unknown
     confidence = Column(Float, nullable=False)
     model = Column(String, nullable=False)
     version = Column(String, nullable=False)
@@ -85,6 +86,18 @@ class AppSetting(Base):
 
 
 Base.metadata.create_all(bind=engine)
+
+
+def _add_missing_columns():
+    """create_all does not alter existing tables, so add columns introduced after a table was created."""
+    existing = {column["name"] for column in inspect(engine).get_columns("predictions")}
+    if "language" not in existing:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE predictions ADD COLUMN language VARCHAR"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_predictions_language ON predictions (language)"))
+
+
+_add_missing_columns()
 
 
 def get_db():
