@@ -11,13 +11,14 @@ Search intent is imported from data/test_db.json, which is not downloadable.
 import json
 import random
 import re
+import threading
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
 from app.config import DATA_DIR
-from app.database import GoldenRow
+from app.database import GoldenRow, SessionLocal
 from app.golden import input_key
 from app.tasks.registry import Task
 
@@ -327,3 +328,66 @@ def import_task(
         "already_present": len(loaded) - created,
         "total_golden_rows": db.query(GoldenRow).filter(GoldenRow.task_id == task.id).count(),
     }
+
+
+# ---------------------------------------------------------------- background import
+
+# What the last import of each example did: {"status": "queued" | "downloading" | "done" | "failed", "message": str}
+_import_state: Dict[str, Dict[str, Any]] = {}
+_import_lock = threading.Lock()
+
+
+def import_status(task_id: str) -> Optional[Dict[str, Any]]:
+    with _import_lock:
+        state = _import_state.get(task_id)
+        return dict(state) if state else None
+
+
+def importing() -> List[str]:
+    """The examples whose import is waiting or under way."""
+    with _import_lock:
+        return [task_id for task_id, state in _import_state.items() if state["status"] in ("queued", "downloading")]
+
+
+def setup_hint(task: Task) -> str:
+    """How to get the example's golden data from the command line."""
+    if task.id == "search_intent":
+        return (
+            "The search-intent data is not downloadable. Put test_db.json in the data/ folder, "
+            "then run: python backend/scripts/import_dataset.py --task search_intent"
+        )
+    return f"python backend/scripts/import_dataset.py --task {task.id}"
+
+
+def start_import(tasks: List[Task], rows: int = DEFAULT_ROWS, seed: int = DEFAULT_SEED, refresh: bool = False) -> List[str]:
+    """Import the examples one after another on a background thread. Returns the ids that were queued."""
+    with _import_lock:
+        queued = [task for task in tasks
+                  if _import_state.get(task.id, {}).get("status") not in ("queued", "downloading")]
+        for task in queued:
+            _import_state[task.id] = {"status": "queued", "message": "Waiting to start"}
+    if queued:
+        threading.Thread(target=_import_all, args=(queued, rows, seed, refresh), name="dataset-import", daemon=True).start()
+    return [task.id for task in queued]
+
+
+def _set_import_state(task_id: str, status: str, message: str) -> None:
+    with _import_lock:
+        _import_state[task_id] = {"status": status, "message": message}
+
+
+def _import_all(tasks: List[Task], rows: int, seed: int, refresh: bool) -> None:
+    for task in tasks:
+        _set_import_state(task.id, "downloading", "Downloading and importing")
+        db = SessionLocal()
+        try:
+            result = import_task(db, task, rows=rows, seed=seed, refresh=refresh)
+            _set_import_state(
+                task.id, "done",
+                f"{result['created']} rows added, {result['already_present']} already there",
+            )
+        except Exception as e:  # noqa: BLE001 - one failed download must not stop the others
+            db.rollback()
+            _set_import_state(task.id, "failed", str(e))
+        finally:
+            db.close()

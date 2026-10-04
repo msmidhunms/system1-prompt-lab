@@ -4,7 +4,7 @@ Shared by the Karpathy loop and the evaluation endpoint, so both report the same
 Labels are passed as indices into the task's label list (k labels).
 """
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -76,6 +76,7 @@ def evaluate(
     task: Task,
     metric: str,
     fit_bias: bool,
+    on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Run Laya with a prompt config over labelled examples ({"text", "label"}) and score it.
 
@@ -90,7 +91,7 @@ def evaluate(
     labels = task.labels
     k = len(labels)
     y = np.array([labels.index(e["label"]) for e in examples])
-    proba = predict_proba([e["text"] for e in examples], config, task)
+    proba = predict_proba([e["text"] for e in examples], config, task, on_progress=on_progress)
     raw_pred = proba.argmax(axis=1)
 
     if fit_bias:
