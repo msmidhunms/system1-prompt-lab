@@ -12,11 +12,11 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app import evaluations, golden, karpathy_loop, llm, scoring, serp, versions
+from app import engines, evaluations, golden, karpathy_loop, llm, scoring, serp, versions
 from app.config import DEFAULT_TASK_ID
 from app.database import EvaluationRun, FeedbackRecord, GoldenRow, PredictionRecord, get_db
 from app.inference import classify_intent
-from app.laya_inference import LAYA_MODELS, predict_batch
+from app.laya_inference import LAYA_MODELS, on_engine, predict_batch
 from app.tasks import sources
 from app.tasks.registry import TASKS, Task, get_task
 from app.versions import BASELINE_VERSION
@@ -38,8 +38,9 @@ def _task(task_id: Optional[str]) -> Task:
 class PredictRequest(BaseModel):
     task: str = DEFAULT_TASK_ID
     text: str
-    model: str = "laya"
     version: str = BASELINE_VERSION
+    # The model to run the version's prompt on. Left out, the one the version was saved for (Laya for the baseline).
+    engine: Optional[str] = None
 
 
 class FeedbackRequest(BaseModel):
@@ -87,6 +88,8 @@ class KarpathyLoopRequest(BaseModel):
     calibrate: bool = True
     use_serp: bool = False
     laya_model: str = "typed-decisions"
+    # The model whose prompt is optimized. Left out, the start version's own (Laya for the baseline).
+    engine: Optional[str] = None
 
 
 class SaveModelRequest(BaseModel):
@@ -112,8 +115,17 @@ class UpdateModelRequest(BaseModel):
 
 class EvaluateRequest(BaseModel):
     task: str = DEFAULT_TASK_ID
-    model: str = "laya"
     version: str = BASELINE_VERSION
+    engine: Optional[str] = None
+    sample_size: int = 100
+    seed: int = 42
+
+
+class CompareRequest(BaseModel):
+    task: str = DEFAULT_TASK_ID
+    version: str = BASELINE_VERSION
+    # The models to run the version's prompt on. Empty means all of them.
+    engines: List[str] = []
     sample_size: int = 100
     seed: int = 42
 
@@ -202,14 +214,15 @@ def predict(request: PredictRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=f"{task.input_label} cannot be empty")
 
     try:
-        config = versions.load_config(request.version, task)
+        config = on_engine(versions.load_config(request.version, task), request.engine)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    engine = config.get("engine") or engines.LAYA
     try:
         prediction = predict_batch([text], config, task)[0]
     except Exception as e:  # noqa: BLE001
-        if task.id != DEFAULT_TASK_ID:
-            raise HTTPException(status_code=500, detail=f"Laya could not classify this {task.item}: {e}")
+        if task.id != DEFAULT_TASK_ID or engine != engines.LAYA:
+            raise HTTPException(status_code=500, detail=f"The model could not classify this {task.item}: {e}")
         # Search intent has a keyword heuristic to fall back on.
         print(f"Laya classification failed: {e}, falling back to keyword-based")
         intent, confidence = classify_intent(text)
@@ -222,7 +235,7 @@ def predict(request: PredictRequest, db: Session = Depends(get_db)):
         query=text,
         predicted_intent=prediction["label"],
         confidence=prediction["confidence"],
-        model=request.model,
+        model=engine,
         version=request.version,
     ))
     db.commit()
@@ -235,7 +248,8 @@ def predict(request: PredictRequest, db: Session = Depends(get_db)):
         "predicted_label": prediction["label"],
         "confidence": prediction["confidence"],
         "probabilities": prediction["probabilities"],
-        "model": request.model,
+        "model": engine,
+        "engine": engine,
         "version": request.version,
         # The label this input already has in the golden dataset, if it is there.
         "golden_label": golden_row.label if golden_row else None,
@@ -385,7 +399,7 @@ def start_karpathy_loop(request: KarpathyLoopRequest, db: Session = Depends(get_
         )
 
     try:
-        start_config = versions.load_config(request.start_version, task)
+        start_config = on_engine(versions.load_config(request.start_version, task), request.engine)
         llm_config = llm.resolve_config(db)
     except (ValueError, llm.LLMError) as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -585,9 +599,34 @@ def run_evaluation(request: Optional[EvaluateRequest] = None, db: Session = Depe
     if request.sample_size < 10 or request.sample_size > 10000:
         raise HTTPException(status_code=400, detail="Sample size must be between 10 and 10000")
     try:
-        return evaluations.start(db, task, request.version, request.sample_size, request.seed, request.model)
+        return evaluations.start(db, task, request.version, request.sample_size, request.seed, request.engine)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/engines")
+def list_engines():
+    """The models an example can be run on."""
+    return engines.public()
+
+
+@router.post("/compare")
+def run_comparison(request: CompareRequest, db: Session = Depends(get_db)):
+    """Evaluate one version's prompt on several models, on the same sample, one model after another."""
+    task = _task(request.task)
+    if request.sample_size < 10 or request.sample_size > 10000:
+        raise HTTPException(status_code=400, detail="Sample size must be between 10 and 10000")
+    try:
+        chosen = [engines.get_engine(e)["id"] for e in request.engines] or list(engines.ENGINES)
+        return evaluations.start_comparison(db, task, request.version, request.sample_size, request.seed, chosen)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/comparisons")
+def list_comparisons(task: str = DEFAULT_TASK_ID, db: Session = Depends(get_db)):
+    """The example's model comparisons, newest first, each with one evaluation per model."""
+    return evaluations.comparisons(db, _task(task))
 
 
 @router.get("/evaluations")

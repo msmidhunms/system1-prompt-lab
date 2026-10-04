@@ -9,7 +9,8 @@ versions of one task:
   task's placeholder is, e.g. {query} for search intent or {message} for support routing.
 - serp_results: how many top SERP results the {serp_*} placeholders draw on (search intent only).
 - instructions / criteria: the question text and one description per label.
-- model: which Laya checkpoint answers ("auto" lets the Router decide per input).
+- engine: which model answers (see app.engines). Left out, it is Laya.
+- model: for Laya, which checkpoint answers ("auto" lets the Router decide per input).
 - label_bias: per-label offsets added to the log-probabilities before the argmax.
   Fitted on the dev set by the Karpathy loop, never written by the LLM.
 
@@ -22,7 +23,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
-from app import serp
+from app import engines, serp
 from app.config import LAYA_DEVICE
 from app.tasks.registry import Task
 
@@ -119,7 +120,11 @@ def validate_config(
         if not isinstance(results, int) or isinstance(results, bool) or not 1 <= results <= serp.MAX_RESULTS:
             raise ValueError(f"serp_results must be an integer between 1 and {serp.MAX_RESULTS}")
         normalised["serp_results"] = results
-    if config.get("model") is not None:
+    engine = engines.get_engine(config.get("engine"))["id"]
+    if engine != engines.LAYA:
+        normalised["engine"] = engine
+    # The checkpoint is a Laya setting; another engine has only the one model.
+    elif config.get("model") is not None:
         if config["model"] not in LAYA_MODELS:
             raise ValueError(f"model must be one of {LAYA_MODELS}")
         normalised["model"] = config["model"]
@@ -191,6 +196,17 @@ def predict_proba(
 
     on_progress(done, total) is called as the inputs are worked through.
     """
+    engine = config.get("engine") or engines.LAYA
+    if engine != engines.LAYA:
+        # The other engines take plain text, the question and the descriptions in label order.
+        # A yes/no task is put to them as a choice between its two descriptions.
+        return engines.predict_proba(
+            engine,
+            [engines.state_text(render_state(config, task, text)) for text in texts],
+            config["instructions"],
+            [config["criteria"][label] for label in task.labels],
+            on_progress=on_progress,
+        )
     questions = build_questions(config, task)
     model = config.get("model", "auto")
     requests = []
@@ -254,3 +270,18 @@ def guess_language(query: str) -> str:
     if detection["is_english"]:
         return "en"
     return detection.get("language") or "other"
+
+
+def on_engine(config: Dict[str, Any], engine: Optional[str]) -> Dict[str, Any]:
+    """The prompt config, run on another engine than the one it was saved for.
+
+    The label bias and the Laya checkpoint belong to the engine they were fitted or chosen for, so they do not carry over.
+    """
+    target = engines.get_engine(engine)["id"] if engine else None
+    current = config.get("engine") or engines.LAYA
+    if target is None or target == current:
+        return config
+    moved = {k: v for k, v in config.items() if k not in ("engine", "model", "label_bias")}
+    if target != engines.LAYA:
+        moved["engine"] = target
+    return moved

@@ -54,6 +54,10 @@ class EvaluationRun(Base):
     progress_done = Column(Integer, default=0)
     progress_total = Column(Integer, default=0)
     error = Column(Text, nullable=True)
+    # Which model ran it (see app.engines), how long the scoring took, and the comparison it is part of, if any.
+    engine = Column(String, nullable=False, default="laya")
+    seconds = Column(Float, nullable=True)
+    comparison_id = Column(String, nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
@@ -155,6 +159,9 @@ def _add_missing_columns():
             "progress_done": "INTEGER DEFAULT 0",
             "progress_total": "INTEGER DEFAULT 0",
             "error": "TEXT",
+            "engine": "VARCHAR NOT NULL DEFAULT 'laya'",
+            "seconds": "FLOAT",
+            "comparison_id": "VARCHAR",
         },
         "experiment_runs": {"task_id": f"VARCHAR NOT NULL DEFAULT '{DEFAULT_TASK_ID}'"},
     }
@@ -164,7 +171,7 @@ def _add_missing_columns():
             for name, definition in columns.items():
                 if name not in existing:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {definition}"))
-                    if name in ("task_id", "language", "run_id"):
+                    if name in ("task_id", "language", "run_id", "comparison_id"):
                         conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table}_{name} ON {table} ({name})"))
 
 

@@ -39,7 +39,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from app import llm, serp, versions
+from app import engines, llm, serp, versions
 from app.config import EVAL_HOLDOUT_RATIO, RESULTS_TSV, RUNS_DIR
 from app.database import ExperimentRun, SessionLocal
 from app.laya_inference import validate_config
@@ -55,8 +55,40 @@ HISTORY_SHOWN = 15
 EXAMPLE_CHARS = 240
 
 
-def build_system_prompt(task: Task, metric: str, calibrate: bool, use_serp: bool) -> str:
+LAYA_NOTES = """- It was trained on states that are JSON objects with named fields, and instructions that name the field in backticks. Example from its presets: state {{"message": "..."}} with instructions "What does the customer want in `message`?". On a dataset of search queries a bare-string state made the model put about 95% of them into a single label, while the same wording with a JSON state and the field named in the instructions produced a real spread of predictions.
+- Its presets describe options in short plain language, for example "money returned or a duplicate charge reversed" or "a bug, outage or integration problem", not as keyword lists.
+- Each criteria description is cut off after about 48 tokens, and the instructions and all {n} descriptions together share a budget of about 190 tokens. Stay under {criterion_words} words each and put the most discriminating words first.
+- Keep instructions under {instruction_words} words.
+- Only about the first 300 tokens of a long {item} are read."""
+
+LAYA_INTRO = (
+    'The classifier is Laya, a fast non-autoregressive "System 1" model. It is not a chat LLM: in one forward pass it '
+    "reads a state, a question's instructions and a short description of each option, and outputs a probability per "
+    "option. It cannot reason step by step or follow long rule lists. It responds to the wording and the format of "
+    "what it is given."
+)
+OTHER_INTRO = (
+    "The classifier is {name}, a small zero-shot classification model. It is not a chat LLM: it scores each label's "
+    "description against the text and outputs a probability per label. It cannot reason step by step or follow long "
+    "rule lists. It responds to the wording of what it is given."
+)
+
+
+def build_system_prompt(task: Task, metric: str, calibrate: bool, use_serp: bool, engine_id: str = engines.LAYA) -> str:
     labels = task.labels
+    engine = engines.get_engine(engine_id)
+    if engine_id == engines.LAYA:
+        intro = LAYA_INTRO
+        notes = LAYA_NOTES.format(n=len(labels), criterion_words=task.max_criterion_words,
+                                  instruction_words=task.max_instruction_words, item=task.item)
+    else:
+        intro = OTHER_INTRO.format(name=engine["name"])
+        notes = (
+            engines.PROMPT_NOTES[engine["family"]]
+            + f"\n- The state template only wraps the text: field names are not shown to this model, so leave it as it is."
+            + f"\n- Keep each description under {task.max_criterion_words} words and the instructions under "
+              f"{task.max_instruction_words} words. Inputs are cut to 512 tokens."
+        )
     field, placeholder = task.input_field, task.placeholder
     state_lines = [
         f'- "state_template": how each {task.item} is presented to the model. Either a plain string, or a JSON object '
@@ -90,7 +122,7 @@ def build_system_prompt(task: Task, metric: str, calibrate: bool, use_serp: bool
     serp_field = '\n  "serp_results": 4,' if use_serp else ""
     return f"""You are running an autoresearch loop that improves a small classifier by rewriting the text it is given.
 
-The classifier is Laya, a fast non-autoregressive "System 1" model. It is not a chat LLM: in one forward pass it reads a state, a question's instructions and a short description of each option, and outputs a probability per option. It cannot reason step by step or follow long rule lists. It responds to the wording and the format of what it is given.
+{intro}
 
 The task is {task.loop_task} into exactly these labels: {", ".join(labels)}. {task.loop_conventions}
 
@@ -98,12 +130,8 @@ You may change these things, and nothing else:
 {chr(10).join(state_lines)}
 {chr(10).join(question_lines)}
 
-What is known about Laya from its own presets and from measurements:
-- It was trained on states that are JSON objects with named fields, and instructions that name the field in backticks. Example from its presets: state {{"message": "..."}} with instructions "What does the customer want in `message`?". On a dataset of search queries a bare-string state made the model put about 95% of them into a single label, while the same wording with a JSON state and the field named in the instructions produced a real spread of predictions.
-- Its presets describe options in short plain language, for example "money returned or a duplicate charge reversed" or "a bug, outage or integration problem", not as keyword lists.
-- Each criteria description is cut off after about 48 tokens, and the instructions and all {len(labels)} descriptions together share a budget of about 190 tokens. Stay under {task.max_criterion_words} words each and put the most discriminating words first.
-- Keep instructions under {task.max_instruction_words} words.
-- Only about the first 300 tokens of a long {task.item} are read.
+What is known about the model:
+{notes}
 
 How the loop scores a config: it is run on a dev set and scored by {METRICS[metric]}. {calibration}
 
@@ -256,11 +284,13 @@ def build_user_prompt(
     return "\n".join(lines)
 
 
-def parse_proposal(raw_reply: str, task: Task, use_serp: bool, laya_model: str) -> Tuple[Dict[str, Any], str, List[str]]:
+def parse_proposal(
+    raw_reply: str, task: Task, use_serp: bool, laya_model: Optional[str], engine_id: str = engines.LAYA
+) -> Tuple[Dict[str, Any], str, List[str]]:
     """Turn the LLM's reply into (config, hypothesis, warnings)."""
     proposal = llm.extract_json(raw_reply)
-    # The checkpoint is a run setting and the bias is fitted, so neither is taken from the LLM.
-    proposal = {**proposal, "model": laya_model}
+    # The model and checkpoint are run settings and the bias is fitted, so none of them is taken from the LLM.
+    proposal = {**proposal, "model": laya_model, "engine": engine_id}
     config, warnings = validate_config(proposal, task, allow_serp=use_serp)
     hypothesis = str(proposal.get("hypothesis", "")).strip() or "(no hypothesis given)"
     return config, hypothesis, warnings
@@ -313,6 +343,8 @@ def _append_results_tsv(run: Dict[str, Any], iteration: int, metrics: Optional[D
 def _with_task(run: Dict[str, Any]) -> Dict[str, Any]:
     """Fill in the task fields of a run saved before there were several examples."""
     run.setdefault("task", DEFAULT_TASK_ID)
+    run.setdefault("engine", engines.LAYA)
+    run.setdefault("engine_name", engines.ENGINES[engines.LAYA]["name"])
     # Failed runs used to leave `improved` unset even when a round had been kept.
     if run.get("status") != "running" and (run.get("best_iteration") or 0) > 0:
         run["improved"] = True
@@ -402,6 +434,8 @@ def start_run(
     laya_model: str,
     excluded_other_language: int = 0,
 ) -> Dict[str, Any]:
+    # The model being optimized comes with the start config (see laya_inference.on_engine).
+    engine_id = start_config.get("engine") or engines.LAYA
     """Create a run and start it on a background thread. Only one run at a time, across all examples."""
     global _active_run_id
     if metric not in METRICS:
@@ -435,7 +469,9 @@ def start_run(
         "metric": metric,
         "calibrate": calibrate,
         "use_serp": use_serp,
-        "laya_model": laya_model,
+        "laya_model": laya_model if engine_id == engines.LAYA else None,
+        "engine": engine_id,
+        "engine_name": engines.get_engine(engine_id)["name"],
         "language": task.language,
         "excluded_other_language": excluded_other_language,
         "keep_confidence": KEEP_CONFIDENCE,
@@ -485,7 +521,8 @@ def _run_loop(
     stop = _stop_events[run_id]
     metric, calibrate, use_serp = run["metric"], run["calibrate"], run["use_serp"]
     labels, k = task.labels, len(task.labels)
-    system_prompt = build_system_prompt(task, metric, calibrate, use_serp)
+    engine_id = run.get("engine") or engines.LAYA
+    system_prompt = build_system_prompt(task, metric, calibrate, use_serp, engine_id)
 
     def update(**fields):
         with _state_lock:
@@ -519,7 +556,8 @@ def _run_loop(
             _log(run, f"Golden {task.items} in language '{task.language}' only: "
                       f"{run['excluded_other_language']} in other languages excluded")
         _log(run, f"Run started for '{task.name}': {len(dev)} dev / {len(holdout)} holdout {task.items}, {run['loops']} rounds, "
-                  f"LLM {llm_config['provider']}:{llm_config['model'] or 'default'}, Laya {run['laya_model']}, "
+                  f"LLM {llm_config['provider']}:{llm_config['model'] or 'default'}, model {run['engine_name']}"
+                  f"{' (' + run['laya_model'] + ')' if run['laya_model'] else ''}, "
                   f"objective {metric}, calibration {'on' if calibrate else 'off'}, SERP {'on' if use_serp else 'off'}")
 
         baseline_config, best_metrics = evaluate(run["baseline_config"], dev, task, metric, fit_bias=calibrate,
@@ -555,7 +593,7 @@ def _run_loop(
             raw_reply = None
             try:
                 raw_reply = llm.complete(llm_config, system_prompt, user_prompt)
-                candidate, hypothesis, warnings = parse_proposal(raw_reply, task, use_serp, run["laya_model"])
+                candidate, hypothesis, warnings = parse_proposal(raw_reply, task, use_serp, run["laya_model"], engine_id)
             except (llm.LLMError, ValueError) as e:
                 consecutive_crashes += 1
                 entry.update(status="crash", error=str(e), hypothesis=None, config=None, score=None,
