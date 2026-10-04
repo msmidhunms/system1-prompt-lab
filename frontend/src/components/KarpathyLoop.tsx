@@ -1,20 +1,17 @@
 import { Fragment, useState, useEffect, useRef } from 'react'
-import axios from 'axios'
-import LLMSettings, { apiError } from './LLMSettings'
+import { api, apiError, pct } from '../api'
+import { useTask } from '../TaskContext'
+import LLMSettings from './LLMSettings'
 import '../styles/KarpathyLoop.css'
 
-const API = 'http://localhost:8000/api'
 const POLL_MS = 2000
-const LABELS = ['informational', 'navigational', 'commercial', 'transactional']
 
 interface GoldenDataStats {
-  imported_data: number
-  user_feedback_count: number
-  unique_feedback_queries: number
-  total_golden_data: number
-  eval_language?: string
-  eval_language_data?: number
-  other_language_data?: number
+  total: number
+  by_source: Record<string, number>
+  eval_language: string | null
+  usable: number
+  excluded_other_language: number
 }
 
 interface PromptConfig {
@@ -55,6 +52,9 @@ interface LoopIteration {
 
 interface Run {
   run_id: string
+  task: string
+  labels: string[]
+  items?: string
   status: 'running' | 'completed' | 'stopped' | 'failed' | 'interrupted'
   phase: string
   started_at: string
@@ -67,7 +67,7 @@ interface Run {
   calibrate?: boolean
   use_serp?: boolean
   laya_model?: string
-  language?: string
+  language?: string | null
   excluded_other_language?: number
   keep_confidence?: number
   dev_size: number
@@ -110,17 +110,18 @@ interface ModelVersion {
 interface LoopOptions {
   metrics: Record<string, string>
   laya_models: string[]
+  serp_supported: boolean
   serp_available: boolean
   keep_confidence: number
 }
 
-const pct = (value: number | null | undefined) => (value == null ? '-' : `${(value * 100).toFixed(1)}%`)
 const signedPts = (value: number) => `${value > 0 ? '+' : ''}${(value * 100).toFixed(1)} pts`
 const arrow = (from: number | null | undefined, to: number | null | undefined) => `${pct(from)} → ${pct(to)}`
 const stateText = (state: PromptConfig['state_template']) => (typeof state === 'string' ? state : JSON.stringify(state))
-const countsText = (counts: Record<string, number>) => LABELS.map((label) => `${label} ${counts[label] ?? 0}`).join(' · ')
+const countsText = (counts: Record<string, number>, labels: string[]) =>
+  labels.map((label) => `${label} ${counts[label] ?? 0}`).join(' · ')
 
-function ConfigView({ config, previous }: { config: PromptConfig; previous?: PromptConfig }) {
+function ConfigView({ config, previous, labels }: { config: PromptConfig; previous?: PromptConfig; labels: string[] }) {
   const changed = (a: string, b: string | undefined) => previous !== undefined && a !== b
   const state = stateText(config.state_template)
   return (
@@ -136,7 +137,7 @@ function ConfigView({ config, previous }: { config: PromptConfig; previous?: Pro
         <dt className={changed(config.instructions, previous?.instructions) ? 'changed' : ''}>instructions</dt>
         <dd>{config.instructions}</dd>
       </div>
-      {LABELS.map((label) => (
+      {labels.map((label) => (
         <div key={label} className="config-row">
           <dt className={changed(config.criteria[label], previous?.criteria[label]) ? 'changed' : ''}>{label}</dt>
           <dd>{config.criteria[label]}</dd>
@@ -151,7 +152,7 @@ function ConfigView({ config, previous }: { config: PromptConfig; previous?: Pro
       {config.label_bias && (
         <div className="config-row fixed">
           <dt>label bias (fitted)</dt>
-          <dd>{LABELS.map((label) => `${label} ${(config.label_bias?.[label] ?? 0).toFixed(1)}`).join(' · ')}</dd>
+          <dd>{labels.map((label) => `${label} ${(config.label_bias?.[label] ?? 0).toFixed(1)}`).join(' · ')}</dd>
         </div>
       )}
     </dl>
@@ -159,12 +160,16 @@ function ConfigView({ config, previous }: { config: PromptConfig; previous?: Pro
 }
 
 export default function KarpathyLoop() {
+  const { task, tasks } = useTask()
   const [stats, setStats] = useState<GoldenDataStats>({
-    imported_data: 0,
-    user_feedback_count: 0,
-    unique_feedback_queries: 0,
-    total_golden_data: 0,
+    total: 0,
+    by_source: {},
+    eval_language: null,
+    usable: 0,
+    excluded_other_language: 0,
   })
+  // A run in progress for another example: only one loop runs at a time.
+  const [otherActiveTask, setOtherActiveTask] = useState<string | null>(null)
   const [versions, setVersions] = useState<ModelVersion[]>([])
   const [options, setOptions] = useState<LoopOptions | null>(null)
   const [runs, setRuns] = useState<RunSummary[]>([])
@@ -188,8 +193,8 @@ export default function KarpathyLoop() {
   const running = run?.status === 'running'
 
   useEffect(() => {
-    axios.get(`${API}/golden-data/stats`).then((res) => setStats(res.data)).catch((err) => console.error('Failed to load stats:', err))
-    axios.get(`${API}/karpathy-loop/options`).then((res) => setOptions(res.data)).catch((err) => console.error('Failed to load options:', err))
+    api.get('/golden-data/stats', { params: { task: task.id } }).then((res) => setStats(res.data)).catch((err) => console.error('Failed to load stats:', err))
+    api.get('/karpathy-loop/options', { params: { task: task.id } }).then((res) => setOptions(res.data)).catch((err) => console.error('Failed to load options:', err))
     loadVersions()
     // Reattach to a loop that is already running on the server.
     loadRuns().then((activeId) => {
@@ -212,13 +217,18 @@ export default function KarpathyLoop() {
   }
 
   const loadVersions = () =>
-    axios.get<ModelVersion[]>(`${API}/models`).then((res) => setVersions(res.data)).catch((err) => console.error('Failed to load versions:', err))
+    api.get<ModelVersion[]>('/models', { params: { task: task.id } }).then((res) => setVersions(res.data)).catch((err) => console.error('Failed to load versions:', err))
 
   const loadRuns = async (): Promise<string | null> => {
     try {
-      const res = await axios.get<{ active_run_id: string | null; runs: RunSummary[] }>(`${API}/karpathy-loop/runs`)
+      const res = await api.get<{ active_run_id: string | null; active_task: string | null; runs: RunSummary[] }>(
+        '/karpathy-loop/runs',
+        { params: { task: task.id } }
+      )
       setRuns(res.data.runs)
-      return res.data.active_run_id
+      const mine = res.data.active_task === task.id
+      setOtherActiveTask(res.data.active_run_id && !mine ? res.data.active_task : null)
+      return mine ? res.data.active_run_id : null
     } catch (err) {
       console.error('Failed to load runs:', err)
       return null
@@ -227,7 +237,7 @@ export default function KarpathyLoop() {
 
   const loadRun = async (runId: string) => {
     try {
-      const res = await axios.get<Run>(`${API}/karpathy-loop/runs/${runId}`)
+      const res = await api.get<Run>(`/karpathy-loop/runs/${runId}`)
       setRun(res.data)
       if (res.data.status !== 'running') loadRuns()
     } catch (err) {
@@ -241,18 +251,20 @@ export default function KarpathyLoop() {
     setNotice(null)
     setExpanded(null)
     try {
-      const res = await axios.post<Run>(`${API}/karpathy-loop`, {
+      const res = await api.post<Run>('/karpathy-loop', {
+        task: task.id,
         loops: numLoops,
         sample_size: sampleSize,
         start_version: startVersion,
         laya_model: layaModel,
         metric,
         calibrate,
-        use_serp: useSerp,
+        use_serp: useSerp && task.supports_serp,
       })
       setRun(res.data)
     } catch (err) {
       setError(apiError(err, 'Failed to start Karpathy loop'))
+      loadRuns()
     } finally {
       setStarting(false)
     }
@@ -261,7 +273,7 @@ export default function KarpathyLoop() {
   const stopRun = async () => {
     if (!run) return
     try {
-      await axios.post(`${API}/karpathy-loop/runs/${run.run_id}/stop`)
+      await api.post(`/karpathy-loop/runs/${run.run_id}/stop`)
       setNotice('Stopping after the current round...')
     } catch (err) {
       setError(apiError(err, 'Failed to stop run'))
@@ -272,7 +284,7 @@ export default function KarpathyLoop() {
     if (!run || !newModelName.trim()) return
     setError(null)
     try {
-      await axios.post(`${API}/save-model`, {
+      await api.post('/save-model', {
         model_name: newModelName.trim(),
         run_id: run.run_id,
         description: `Karpathy loop ${run.run_id}, best round ${run.best_iteration}`,
@@ -302,42 +314,48 @@ export default function KarpathyLoop() {
   const gain = baselineScore != null && bestScore != null ? bestScore - baselineScore : null
   const objectiveLabel = (run?.metric && options?.metrics[run.metric]) || 'accuracy'
   const keepConfidence = options?.keep_confidence ?? 0.8
+  const runLabels = run?.labels ?? task.labels
+  const runItems = run?.items ?? task.items
+  const otherTaskName = tasks.find((t) => t.id === otherActiveTask)?.name ?? otherActiveTask
 
   return (
     <div className="karpathy-loop">
       <div className="section">
-        <h2>Karpathy Loop - Prompt Autoresearch</h2>
+        <h2>Karpathy Loop: {task.name}</h2>
         <p className="description">
           An LLM rewrites the text Laya is given (state template, question instructions, label descriptions). Each
-          proposal is scored on a dev set of golden queries and kept only if it beats the current best by more than
-          noise. Queries the LLM never sees are scored at the end.
+          proposal is scored on a dev set of golden {task.items} and kept only if it beats the current best by more
+          than noise. {task.items.charAt(0).toUpperCase() + task.items.slice(1)} the LLM never sees are scored at the end.
         </p>
 
         <div className="golden-data-summary">
           <h3>Golden Dataset Summary</h3>
           <div className="summary-stats">
             <div className="stat">
-              <span className="stat-label">Imported Keywords:</span>
-              <span className="stat-value">{stats.imported_data}</span>
+              <span className="stat-label">Imported:</span>
+              <span className="stat-value">{stats.by_source.imported ?? 0}</span>
             </div>
             <div className="stat">
-              <span className="stat-label">User Feedback Entries:</span>
-              <span className="stat-value">{stats.user_feedback_count}</span>
+              <span className="stat-label">Added by hand:</span>
+              <span className="stat-value">{stats.by_source.manual ?? 0}</span>
             </div>
             <div className="stat">
-              <span className="stat-label">Unique Feedback Queries:</span>
-              <span className="stat-value">{stats.unique_feedback_queries}</span>
+              <span className="stat-label">From feedback:</span>
+              <span className="stat-value">{stats.by_source.feedback ?? 0}</span>
             </div>
             <div className="stat highlight">
               <span className="stat-label">Total Golden Data:</span>
-              <span className="stat-value">{stats.total_golden_data}</span>
+              <span className="stat-value">{stats.total}</span>
             </div>
           </div>
-          {stats.eval_language_data != null && (
+          {stats.eval_language && (
             <p className="control-hint">
-              Only the {stats.eval_language_data} queries in language "{stats.eval_language}" are used for the loop and
-              for evaluation. {stats.other_language_data} in other languages are left out.
+              Only the {stats.usable} {task.items} in language "{stats.eval_language}" are used for the loop and for
+              evaluation. {stats.excluded_other_language} in other languages are left out.
             </p>
+          )}
+          {stats.total === 0 && (
+            <p className="control-hint">This example has no golden data yet. Import its dataset in the Golden Dataset tab.</p>
           )}
         </div>
 
@@ -410,16 +428,18 @@ export default function KarpathyLoop() {
             <input type="checkbox" checked={calibrate} onChange={(e) => setCalibrate(e.target.checked)} disabled={running} />
             Calibrate label bias on the dev set (stops one label swallowing every prediction)
           </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={useSerp}
-              onChange={(e) => setUseSerp(e.target.checked)}
-              disabled={running || !options?.serp_available}
-            />
-            Let the LLM add search-result context to the input
-            {options && !options.serp_available ? ' (data/test_db.json not found)' : ' (only golden queries have it; live predictions will not)'}
-          </label>
+          {task.supports_serp && (
+            <label>
+              <input
+                type="checkbox"
+                checked={useSerp}
+                onChange={(e) => setUseSerp(e.target.checked)}
+                disabled={running || !options?.serp_available}
+              />
+              Let the LLM add search-result context to the input
+              {options && !options.serp_available ? ' (data/test_db.json not found)' : ' (only golden queries have it; live predictions will not)'}
+            </label>
+          )}
         </div>
 
         <div className="loop-controls">
@@ -428,12 +448,22 @@ export default function KarpathyLoop() {
               Stop After This Round
             </button>
           ) : (
-            <button onClick={startKarpathyLoop} disabled={starting || stats.total_golden_data === 0} className="start-loop-btn">
+            <button
+              onClick={startKarpathyLoop}
+              disabled={starting || stats.total === 0 || otherActiveTask !== null}
+              className="start-loop-btn"
+            >
               {starting ? 'Starting...' : `Start Karpathy Loop (${numLoops} Rounds)`}
             </button>
           )}
         </div>
         {activeLLM && <p className="control-hint">Proposals come from: {activeLLM}</p>}
+        {otherActiveTask && (
+          <p className="warning-line">
+            A loop for the example "{otherTaskName}" is in progress. Only one loop runs at a time, so wait for it to
+            finish or stop it from that example.
+          </p>
+        )}
 
         {error && <div className="error-message">{error}</div>}
         {notice && <div className="success-message">{notice}</div>}
@@ -450,7 +480,7 @@ export default function KarpathyLoop() {
             {run.llm.model ? ` · ${run.llm.model}` : ''} · started from {run.start_version}
             {run.laya_model ? ` · Laya ${run.laya_model}` : ''} · objective: {objectiveLabel}
             {run.calibrate ? ' · calibrated' : ''}
-            {run.use_serp ? ' · SERP context allowed' : ''} · {run.dev_size} dev / {run.holdout_size} holdout queries
+            {run.use_serp ? ' · SERP context allowed' : ''} · {run.dev_size} dev / {run.holdout_size} holdout {runItems}
             {run.language ? ` · ${run.language} only` : ''}
           </p>
 
@@ -553,7 +583,7 @@ export default function KarpathyLoop() {
                         <tr className="iteration-detail">
                           <td colSpan={7}>
                             {iter.predicted_counts && (
-                              <p className="control-hint">Predicted labels: {countsText(iter.predicted_counts)}</p>
+                              <p className="control-hint">Predicted labels: {countsText(iter.predicted_counts, runLabels)}</p>
                             )}
                             {iter.status === 'discard' && iter.delta_vs_best != null && iter.delta_vs_best > 0 && (
                               <p className="warning-line">
@@ -561,7 +591,7 @@ export default function KarpathyLoop() {
                               </p>
                             )}
                             <p className="control-hint">Proposed prompt. Highlighted fields differ from the best prompt at the time.</p>
-                            <ConfigView config={iter.config} previous={bestBefore(index)} />
+                            <ConfigView config={iter.config} previous={bestBefore(index)} labels={runLabels} />
                             {iter.warnings.map((w) => (
                               <p key={w} className="warning-line">
                                 {w}
@@ -579,7 +609,7 @@ export default function KarpathyLoop() {
 
           <div className="best-config">
             <h4>{run.best_iteration === 0 ? 'Current Best Prompt (baseline)' : `Current Best Prompt (round ${run.best_iteration})`}</h4>
-            <ConfigView config={run.best_config} previous={run.best_iteration === 0 ? undefined : run.baseline_config} />
+            <ConfigView config={run.best_config} previous={run.best_iteration === 0 ? undefined : run.baseline_config} labels={runLabels} />
           </div>
 
           {!running && run.improved && (
@@ -689,7 +719,7 @@ export default function KarpathyLoop() {
             <div className="step-number">5</div>
             <div>
               <strong>Holdout and Save</strong>
-              <p>The best prompt is checked on unseen queries, then saved as a model version</p>
+              <p>The best prompt is checked on unseen {task.items}, then saved as a model version</p>
             </div>
           </div>
         </div>
