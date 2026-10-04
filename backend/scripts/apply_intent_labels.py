@@ -3,7 +3,7 @@
 
 The values live in two places and both are updated:
 - data/test_db.json: search_intent_info.main_intent / foreign_intent and extra.detected_language of each row
-- the predictions table (version v1_test_data): predicted_intent / secondary_intents / language
+- the golden_rows table (search_intent example): label / secondary_labels / language
 
     python backend/scripts/apply_intent_labels.py                      # apply the reviewed values
     python backend/scripts/apply_intent_labels.py --restore-original   # put the provider's values back
@@ -23,8 +23,8 @@ backend_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(backend_dir))
 os.chdir(backend_dir)
 
-from app.database import SessionLocal, PredictionRecord
-from app.config import DATA_DIR
+from app.database import SessionLocal, GoldenRow
+from app.config import DATA_DIR, DEFAULT_TASK_ID
 from app.tasks.intent.labels import SearchIntent
 
 LABELS_FILE = DATA_DIR / "intent_labels.csv"
@@ -97,22 +97,27 @@ def update_json_file(path: Path, labels: dict, dry_run: bool) -> int:
 
 
 def update_database(labels: dict, dry_run: bool) -> int:
-    """Update the golden rows in the predictions table. Returns the number of rows changed."""
+    """Update the imported search-intent rows in the golden_rows table. Returns the number of rows changed.
+
+    Rows added by hand or through feedback are not in the review file and are left alone.
+    """
     db = SessionLocal()
     changed = 0
     try:
-        records = db.query(PredictionRecord).filter(PredictionRecord.version == "v1_test_data").all()
-        missing = [r.query for r in records if r.query not in labels]
+        records = db.query(GoldenRow).filter(
+            GoldenRow.task_id == DEFAULT_TASK_ID, GoldenRow.source == "imported"
+        ).all()
+        missing = [r.input_text for r in records if r.input_text not in labels]
         if missing:
             raise ValueError(f"{len(missing)} golden rows have no entry in {LABELS_FILE.name}, e.g. '{missing[0]}'")
         for record in records:
-            main, secondary, language = labels[record.query]
-            # Same convention as import_test_data.py: no secondary intents is stored as None.
+            main, secondary, language = labels[record.input_text]
+            # Same convention as the import: no secondary intents is stored as None.
             new_secondary = secondary if secondary else None
-            current = (record.predicted_intent, record.secondary_intents or None, record.language)
+            current = (record.label, record.secondary_labels or None, record.language)
             if current != (main, new_secondary, language):
-                record.predicted_intent = main
-                record.secondary_intents = new_secondary
+                record.label = main
+                record.secondary_labels = new_secondary
                 record.language = language
                 changed += 1
         if dry_run:
@@ -148,7 +153,7 @@ def main():
         print(f"   {TEST_DB_FILE.name}: not found, skipped")
 
     db_changed = update_database(labels, args.dry_run)
-    print(f"   predictions table: {db_changed} rows changed")
+    print(f"   golden_rows table: {db_changed} rows changed")
 
     if args.dry_run:
         print("\nDry run: nothing was written")
