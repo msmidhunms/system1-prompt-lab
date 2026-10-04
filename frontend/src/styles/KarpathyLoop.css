@@ -349,6 +349,11 @@
   border: 1px solid rgba(81, 207, 102, 0.3);
 }
 
+.results-section .model-saving-section,
+.results-section .no-improvement {
+  margin-top: 2rem;
+}
+
 .model-saving-section h3 {
   color: #51cf66;
   margin-top: 0;
