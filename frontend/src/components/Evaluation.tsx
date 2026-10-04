@@ -19,8 +19,10 @@ interface ErrorCase {
 
 interface Summary {
   eval_id: string
+  engine: string
+  ms_per_item: number | null
   version: string
-  status: 'running' | 'completed' | 'failed' | 'interrupted'
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted'
   progress_done: number
   progress_total: number
   error: string | null
@@ -47,7 +49,9 @@ const ERROR_PREVIEW_CHARS = 300
 
 export default function Evaluation() {
   const { task, color, versions, refreshVersions, intent, clearIntent } = useTask()
-  const { refreshActivity } = useApp()
+  const { refreshActivity, engines, engineName } = useApp()
+  // '' means the model the version was saved for.
+  const [engine, setEngine] = useState('')
   const [version, setVersion] = useState('v1_baseline')
   const [sampleSize, setSampleSize] = useState(200)
   const [error, setError] = useState<string | null>(null)
@@ -78,26 +82,31 @@ export default function Evaluation() {
   // On opening the page, pick up an evaluation that is already running (e.g. after a reload).
   useEffect(() => {
     loadHistory().then((items) => {
-      const running = items.find((item) => item.status === 'running')
+      const running = items.find((item) => item.status === 'running' || item.status === 'queued')
       if (running) openEvaluation(running.eval_id)
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
-    if (intent?.tab === 'evaluation' && intent.version) {
-      setVersion(intent.version)
-      clearIntent()
+    if (intent?.tab !== 'evaluation') return
+    if (intent.version) setVersion(intent.version)
+    if (intent.evalId) {
+      openEvaluation(intent.evalId)
+      loadHistory()
     }
+    clearIntent()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [intent, clearIntent])
 
   // Follow the evaluation on screen until it stops running. This keeps going while the page is hidden.
-  const followId = result?.status === 'running' ? result.eval_id : null
+  const active = result?.status === 'running' || result?.status === 'queued'
+  const followId = active ? result.eval_id : null
   useEffect(() => {
     if (!followId) return
     const timer = window.setInterval(async () => {
       const latest = await openEvaluation(followId)
-      if (latest && latest.status !== 'running') {
+      if (latest && latest.status !== 'running' && latest.status !== 'queued') {
         loadHistory()
         refreshVersions()
       }
@@ -109,7 +118,7 @@ export default function Evaluation() {
   const start = async () => {
     setError(null)
     try {
-      const res = await api.post<Result>('/evaluate', { task: task.id, model: 'laya', version, sample_size: sampleSize })
+      const res = await api.post<Result>('/evaluate', { task: task.id, version, engine: engine || undefined, sample_size: sampleSize })
       setResult(res.data)
       loadHistory()
       refreshActivity()
@@ -118,7 +127,7 @@ export default function Evaluation() {
     }
   }
 
-  const running = result?.status === 'running'
+  const running = active
   const labels = result?.confusion_matrix ? Object.keys(result.confusion_matrix) : []
 
   return (
@@ -130,6 +139,14 @@ export default function Evaluation() {
               <select className="input" value={version} onChange={(e) => setVersion(e.target.value)} disabled={running}>
                 {versions.map((v) => (
                   <option key={v.version} value={v.version}>{v.version}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Model">
+              <select className="input" value={engine} onChange={(e) => setEngine(e.target.value)} disabled={running}>
+                <option value="">The version's own</option>
+                {engines.map((e) => (
+                  <option key={e.id} value={e.id}>{e.name}</option>
                 ))}
               </select>
             </Field>
@@ -153,8 +170,8 @@ export default function Evaluation() {
         </div>
       </Card>
 
-      {result && result.status === 'running' && (
-        <Card title={`Evaluating ${result.version}`}>
+      {result && active && (
+        <Card title={`Evaluating ${result.version} on ${engineName(result.engine)}`}>
           <div className="stack">
             <ProgressBar done={result.progress_done} total={result.progress_total} />
             <span className="small secondary num">
@@ -181,7 +198,8 @@ export default function Evaluation() {
               <StatTile label="Sample" value={result.total_cases ?? 0} note={`of ${result.total_golden_data ?? '–'} golden ${task.items}`} />
             </div>
             <p className="small muted" style={{ marginTop: 8 }}>
-              {result.version} · evaluated {when(result.timestamp)}
+              {result.version} on {engineName(result.engine)} · evaluated {when(result.timestamp)}
+              {result.ms_per_item != null && ` · ${result.ms_per_item} ms per ${task.item}`}
               {result.eval_language && ` · ${result.eval_language} only (${result.excluded_other_language} in other languages left out)`}
             </p>
           </div>
@@ -293,6 +311,7 @@ export default function Evaluation() {
                 <tr>
                   <th>Evaluated</th>
                   <th>Version</th>
+                  <th>Model</th>
                   <th>Status</th>
                   <th>Sample</th>
                   <th>Accuracy</th>
@@ -304,6 +323,7 @@ export default function Evaluation() {
                   <tr key={item.eval_id} className={`clickable ${result?.eval_id === item.eval_id ? 'selected' : ''}`} onClick={() => openEvaluation(item.eval_id)}>
                     <td className="nowrap">{when(item.timestamp)}</td>
                     <td>{item.version}</td>
+                    <td className="secondary">{engineName(item.engine)}</td>
                     <td><StatusBadge status={item.status} /></td>
                     <td className="num">{item.sample_size}</td>
                     <td className="num">{pct(item.accuracy)}</td>

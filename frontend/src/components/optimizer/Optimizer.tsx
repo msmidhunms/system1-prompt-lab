@@ -15,6 +15,8 @@ interface Options {
 }
 
 interface RunSettings {
+  // '' means the model the start version was saved for.
+  engine: string
   sampleSize: number
   loops: number
   layaModel: string
@@ -23,7 +25,7 @@ interface RunSettings {
   useSerp: boolean
 }
 
-const DEFAULTS: RunSettings = { sampleSize: 400, loops: 10, layaModel: 'typed-decisions', metric: 'balanced', calibrate: true, useSerp: false }
+const DEFAULTS: RunSettings = { engine: '', sampleSize: 400, loops: 10, layaModel: 'typed-decisions', metric: 'balanced', calibrate: true, useSerp: false }
 
 // Run settings are remembered per example, in this browser.
 function useRunSettings(taskId: string): [RunSettings, (patch: Partial<RunSettings>) => void] {
@@ -45,7 +47,7 @@ function useRunSettings(taskId: string): [RunSettings, (patch: Partial<RunSettin
 
 export default function Optimizer() {
   const { task, versions, refreshVersions } = useTask()
-  const { llm, activity, refreshActivity, openSettings, tasks, go } = useApp()
+  const { llm, activity, refreshActivity, openSettings, tasks, go, engines } = useApp()
   const [settings, update] = useRunSettings(task.id)
   const [startVersion, setStartVersion] = useState('v1_baseline')
   const [options, setOptions] = useState<Options | null>(null)
@@ -106,6 +108,7 @@ export default function Optimizer() {
         sample_size: settings.sampleSize,
         start_version: startVersion,
         laya_model: settings.layaModel,
+        engine: settings.engine || undefined,
         metric: settings.metric,
         calibrate: settings.calibrate,
         use_serp: settings.useSerp && task.supports_serp,
@@ -138,7 +141,7 @@ export default function Optimizer() {
     <div className="page">
       <Card
         title="Optimize the prompt"
-        sub={`An LLM rewrites the prompt Laya is given. Each proposal is scored on a dev set of golden ${task.items} and kept only if it beats the current best by more than noise; ${task.items} the LLM never sees are scored at the end. (The method is Karpathy's autoresearch loop.)`}
+        sub={`An LLM rewrites the prompt the model is given. Each proposal is scored on a dev set of golden ${task.items} and kept only if it beats the current best by more than noise; ${task.items} the LLM never sees are scored at the end. (The method is Karpathy's autoresearch loop.)`}
       >
         <div className="stack">
           <div className="row between">
@@ -172,6 +175,14 @@ export default function Optimizer() {
                 ))}
               </select>
             </Field>
+            <Field label="Model to optimize">
+              <select className="input" value={settings.engine} onChange={(e) => update({ engine: e.target.value })} disabled={running}>
+                <option value="">The start version's own</option>
+                {engines.map((e) => (
+                  <option key={e.id} value={e.id}>{e.name}</option>
+                ))}
+              </select>
+            </Field>
             <Field label="Rounds">
               <input className="input narrow num" type="number" min={1} max={100} value={settings.loops} disabled={running}
                 onChange={(e) => update({ loops: Math.max(1, Math.min(100, parseInt(e.target.value) || 10)) })} />
@@ -180,13 +191,15 @@ export default function Optimizer() {
               <input className="input narrow num" type="number" min={20} max={10000} value={settings.sampleSize} disabled={running}
                 onChange={(e) => update({ sampleSize: Math.max(20, Math.min(10000, parseInt(e.target.value) || 400)) })} />
             </Field>
-            <Field label="Laya checkpoint">
-              <select className="input" value={settings.layaModel} onChange={(e) => update({ layaModel: e.target.value })} disabled={running}>
-                {(options?.laya_models ?? [settings.layaModel]).map((m) => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
-            </Field>
+            {(settings.engine === '' || settings.engine === 'laya') && (
+              <Field label="Laya checkpoint">
+                <select className="input" value={settings.layaModel} onChange={(e) => update({ layaModel: e.target.value })} disabled={running}>
+                  {(options?.laya_models ?? [settings.layaModel]).map((m) => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+              </Field>
+            )}
             <Field label="Objective">
               <select className="input" value={settings.metric} onChange={(e) => update({ metric: e.target.value })} disabled={running}>
                 {Object.entries(options?.metrics ?? { [settings.metric]: settings.metric }).map(([key, label]) => (

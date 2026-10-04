@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, apiError, ModelVersion, pct, PromptConfig, SOURCE_LABELS, when } from '../api'
-import { useTask } from '../context'
+import { useApp, useTask } from '../context'
 import { Badge, Banner, Button, Card, Dialog, Menu, NameDialog } from '../ui'
 import { ConfigView, PromptEditor } from './PromptConfig'
 
@@ -8,6 +8,7 @@ type EditSource = { name: string; config: PromptConfig; base: string | null }
 
 export default function Models() {
   const { task, versions, refreshVersions, open, intent, clearIntent } = useTask()
+  const { engineName } = useApp()
   const [viewing, setViewing] = useState<ModelVersion | null>(null)
   const [editing, setEditing] = useState<EditSource | null>(null)
   const [renaming, setRenaming] = useState<ModelVersion | null>(null)
@@ -49,7 +50,7 @@ export default function Models() {
       {notice && <Banner tone="success">{notice}</Banner>}
       <Card
         title="Model versions"
-        sub="A version is a prompt for Laya: how the input is presented, the question, and a description of each label. The optimizer saves its best prompts here, and you can write your own from a copy."
+        sub="A version is a prompt for one model: how the input is presented, the question, and a description of each label. The optimizer saves its best prompts here, and you can write your own from a copy. Any version can also be tried or evaluated on another model."
         flush
       >
         <div className="table-wrap">
@@ -57,6 +58,7 @@ export default function Models() {
             <thead>
               <tr>
                 <th>Name</th>
+                <th>Model</th>
                 <th>Origin</th>
                 <th>Based on</th>
                 <th>Dev accuracy</th>
@@ -73,6 +75,7 @@ export default function Models() {
                     <strong>{v.version}</strong>
                     {v.description && <div className="small secondary">{v.description}</div>}
                   </td>
+                  <td className="secondary">{v.source === 'baseline' ? 'Any' : engineName(v.config.engine)}</td>
                   <td><Badge tone={v.source === 'auto' ? 'accent' : undefined}>{SOURCE_LABELS[v.source]}</Badge></td>
                   <td className="secondary">{v.base_version ?? '–'}</td>
                   <td className="num">{pct(v.accuracy)}</td>

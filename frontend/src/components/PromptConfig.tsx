@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { api, apiError, ModelVersion, PromptConfig, stateText, TaskInfo } from '../api'
+import { useApp } from '../context'
 import { Banner, Button, Dialog, Field } from '../ui'
 
 const LAYA_MODELS = ['auto', 'english', 'multilingual', 'typed-decisions']
@@ -23,6 +24,7 @@ export function ConfigView({ config, previous, labels }: { config: PromptConfig;
           {config.criteria[label]}
         </FragmentRow>
       ))}
+      {config.engine && <FragmentRow term="Model">{config.engine}</FragmentRow>}
       {config.model && <FragmentRow term="Laya checkpoint">{config.model}</FragmentRow>}
       {config.label_bias && (
         <FragmentRow term="Label bias">
@@ -54,6 +56,8 @@ export function PromptEditor({ task, from, onSaved, onClose }: {
   const [state, setState] = useState(stateText(from.config.state_template))
   const [instructions, setInstructions] = useState(from.config.instructions)
   const [criteria, setCriteria] = useState<Record<string, string>>({ ...from.config.criteria })
+  const { engines } = useApp()
+  const [engine, setEngine] = useState(from.config.engine ?? 'laya')
   const [model, setModel] = useState(from.config.model ?? 'auto')
   const [bias, setBias] = useState<Record<string, string>>(
     Object.fromEntries(task.labels.map((label) => [label, String(from.config.label_bias?.[label] ?? 0)]))
@@ -82,7 +86,7 @@ export function PromptEditor({ task, from, onSaved, onClose }: {
       state_template: stateTemplate,
       instructions,
       criteria,
-      model,
+      ...(engine === 'laya' ? { model } : { engine }),
       ...(from.config.serp_results != null ? { serp_results: from.config.serp_results } : {}),
       ...(Object.values(labelBias).some((v) => v !== 0) ? { label_bias: labelBias } : {}),
     }
@@ -158,13 +162,22 @@ export function PromptEditor({ task, from, onSaved, onClose }: {
           )
         })}
         <div className="row end">
-          <Field label="Laya checkpoint">
-            <select className="input" value={model} onChange={(e) => setModel(e.target.value)} disabled={saved}>
-              {LAYA_MODELS.map((m) => (
-                <option key={m} value={m}>{m}</option>
+          <Field label="Model">
+            <select className="input" value={engine} onChange={(e) => setEngine(e.target.value)} disabled={saved}>
+              {engines.map((e) => (
+                <option key={e.id} value={e.id}>{e.name}</option>
               ))}
             </select>
           </Field>
+          {engine === 'laya' && (
+            <Field label="Laya checkpoint">
+              <select className="input" value={model} onChange={(e) => setModel(e.target.value)} disabled={saved}>
+                {LAYA_MODELS.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            </Field>
+          )}
           {task.labels.map((label) => (
             <Field key={label} label={`Bias: ${label}`}>
               <input className="input narrow num" type="number" step="0.1" value={bias[label]} onChange={(e) => setBias({ ...bias, [label]: e.target.value })} disabled={saved} />

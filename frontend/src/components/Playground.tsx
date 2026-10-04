@@ -17,7 +17,9 @@ interface Prediction {
 
 export default function Playground() {
   const { task, color, versions, intent, clearIntent } = useTask()
-  const { refreshTasks } = useApp()
+  const { refreshTasks, engines, engineName } = useApp()
+  // '' means the model the version was saved for.
+  const [engine, setEngine] = useState('')
   const [text, setText] = useState('')
   const [version, setVersion] = useState('v1_baseline')
   const [prediction, setPrediction] = useState<Prediction | null>(null)
@@ -46,7 +48,7 @@ export default function Playground() {
     setCorrectLabel('')
     setNotes('')
     try {
-      const res = await api.post<Prediction>('/predict', { task: task.id, text: text.trim(), model: 'laya', version })
+      const res = await api.post<Prediction>('/predict', { task: task.id, text: text.trim(), version, engine: engine || undefined })
       setPrediction(res.data)
     } catch (err) {
       setError(apiError(err, 'Failed to classify'))
@@ -108,6 +110,14 @@ export default function Playground() {
                 ))}
               </select>
             </Field>
+            <Field label="Model">
+              <select className="input" value={engine} onChange={(e) => setEngine(e.target.value)} disabled={loading}>
+                <option value="">The version's own</option>
+                {engines.map((e) => (
+                  <option key={e.id} value={e.id}>{e.name}</option>
+                ))}
+              </select>
+            </Field>
             <Button variant="primary" onClick={classify} disabled={loading || !text.trim()}>
               {loading ? 'Classifying…' : 'Classify'}
             </Button>
@@ -122,7 +132,7 @@ export default function Playground() {
           <div className="stack">
             <div className="row">
               <LabelBadge label={prediction.predicted_label} color={color(prediction.predicted_label)} />
-              <span className="secondary">{(prediction.confidence * 100).toFixed(1)}% confidence</span>
+              <span className="secondary">{(prediction.confidence * 100).toFixed(1)}% confidence · {engineName(prediction.model)}</span>
               {prediction.golden_label && (
                 <span className="secondary">
                   · already in the golden dataset as <LabelBadge label={prediction.golden_label} color={color(prediction.golden_label)} />

@@ -6,6 +6,7 @@ import Playground from './components/Playground'
 import Dataset from './components/Dataset'
 import Models from './components/Models'
 import Evaluation from './components/Evaluation'
+import Compare from './components/Compare'
 import Optimizer from './components/optimizer/Optimizer'
 import SettingsDialog from './components/SettingsDialog'
 import SetupDialog from './components/SetupDialog'
@@ -15,6 +16,7 @@ const PAGES: Record<TabId, () => JSX.Element> = {
   dataset: Dataset,
   models: Models,
   evaluation: Evaluation,
+  compare: Compare,
   optimizer: Optimizer,
 }
 
@@ -48,8 +50,12 @@ function ActivityIndicator() {
     const { task, rounds_done, rounds } = activity.loop
     items.push({ text: `Optimizing ${name(task)} · round ${Math.min(rounds_done + 1, rounds)} of ${rounds}`, task, tab: 'optimizer' })
   }
-  for (const e of activity.evaluations) {
-    items.push({ text: `Evaluating ${name(e.task)} · ${e.progress_done} / ${e.progress_total}`, task: e.task, tab: 'evaluation' })
+  for (const e of activity.evaluations.filter((e) => e.status === 'running')) {
+    items.push({
+      text: `${e.comparison_id ? 'Comparing models on' : 'Evaluating'} ${name(e.task)} · ${e.progress_done} / ${e.progress_total}`,
+      task: e.task,
+      tab: e.comparison_id ? 'compare' : 'evaluation',
+    })
   }
   for (const i of activity.imports) {
     items.push({ text: `Importing ${name(i.task)}`, task: i.task, tab: 'dataset' })

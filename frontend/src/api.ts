@@ -32,7 +32,20 @@ export interface TaskInfo {
   max_instruction_words: number
 }
 
+// A model an example can be run on.
+export interface Engine {
+  id: string
+  name: string
+  repo: string
+  params: string | null
+  family: string
+  passes: string
+  notes: string
+}
+
 export interface PromptConfig {
+  // The model the prompt is for. Left out, it is Laya.
+  engine?: string
   state_template: string | Record<string, string>
   serp_results?: number
   instructions: string
@@ -65,7 +78,7 @@ export interface ModelVersion {
 
 export interface Activity {
   loop: { run_id: string; task: string; phase: string; rounds_done: number; rounds: number } | null
-  evaluations: { eval_id: string; task: string; version: string; progress_done: number; progress_total: number }[]
+  evaluations: { eval_id: string; task: string; engine: string; version: string; status: string; progress_done: number; progress_total: number; comparison_id: string | null }[]
   imports: { task: string; status: string; message: string }[]
 }
 
@@ -74,6 +87,7 @@ export const TABS = [
   { id: 'dataset', label: 'Dataset' },
   { id: 'models', label: 'Models' },
   { id: 'evaluation', label: 'Evaluation' },
+  { id: 'compare', label: 'Compare Models' },
   { id: 'optimizer', label: 'Prompt Optimizer' },
 ] as const
 export type TabId = (typeof TABS)[number]['id']

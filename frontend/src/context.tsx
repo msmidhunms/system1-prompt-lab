@@ -1,6 +1,6 @@
 // App-wide state: the examples, the LLM settings and what is running in the background.
 import { createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode } from 'react'
-import { api, apiError, labelColor, Activity, ModelVersion, PromptConfig, TabId, TABS, TaskInfo } from './api'
+import { api, apiError, labelColor, Activity, Engine, ModelVersion, PromptConfig, TabId, TABS, TaskInfo } from './api'
 
 export interface ProviderInfo {
   label: string
@@ -24,6 +24,9 @@ export interface LLMConfig {
 interface AppState {
   tasks: TaskInfo[]
   refreshTasks: () => Promise<void>
+  // The models an example can be run on, Laya first.
+  engines: Engine[]
+  engineName: (id: string | null | undefined) => string
   llm: LLMConfig | null
   setLLM: (config: LLMConfig) => void
   activity: Activity
@@ -52,6 +55,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [tasks, setTasks] = useState<TaskInfo[] | null>(null)
   const [llm, setLLM] = useState<LLMConfig | null>(null)
+  const [engines, setEngines] = useState<Engine[]>([])
   const [activity, setActivity] = useState<Activity>(IDLE)
   const [error, setError] = useState<string | null>(null)
   const wasImporting = useRef(false)
@@ -82,6 +86,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     refreshTasks()
     refreshActivity()
     api.get<LLMConfig>('/llm/config').then((res) => setLLM(res.data)).catch(() => undefined)
+    api.get<Engine[]>('/engines').then((res) => setEngines(res.data)).catch(() => undefined)
   }, [refreshTasks, refreshActivity])
 
   // Poll quickly while something runs, slowly otherwise (work can be started from another window).
@@ -116,6 +121,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     <AppContext.Provider
       value={{
         tasks, refreshTasks, llm, setLLM, activity, refreshActivity,
+        engines, engineName: (id) => engines.find((e) => e.id === (id || 'laya'))?.name ?? id ?? 'Laya',
         settingsOpen, openSettings: () => setSettingsOpen(true), closeSettings: () => setSettingsOpen(false),
         // An unknown or missing example in the URL falls back to the first one.
         route: { task: tasks.some((t) => t.id === route.task) ? route.task : tasks[0].id, tab: route.tab },
@@ -145,6 +151,8 @@ interface WorkspaceState {
 export interface Intent {
   tab: TabId
   version?: string
+  // An evaluation to show (Evaluation tab).
+  evalId?: string
   editFrom?: { name: string; config: PromptConfig; base: string | null }
 }
 

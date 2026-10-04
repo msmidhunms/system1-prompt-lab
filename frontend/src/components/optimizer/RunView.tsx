@@ -68,7 +68,7 @@ export default function RunView({ run, objective, keepConfidence, onStop, onChan
           <>
             {run.llm.provider}
             {run.llm.model ? ` · ${run.llm.model}` : ''} · started from {run.start_version}
-            {run.laya_model ? ` · Laya ${run.laya_model}` : ''} · objective: {objective}
+            {` · ${run.engine_name ?? 'Laya'}`}{run.laya_model ? ` (${run.laya_model})` : ''} · objective: {objective}
             {run.calibrate ? ' · calibrated' : ''}
             {run.use_serp ? ' · search-result context allowed' : ''} · {run.dev_size} dev / {run.holdout_size} holdout {run.items ?? 'rows'}
           </>

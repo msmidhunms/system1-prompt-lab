@@ -39,7 +39,9 @@ export interface Run {
   metric?: string
   calibrate?: boolean
   use_serp?: boolean
-  laya_model?: string
+  laya_model?: string | null
+  engine?: string
+  engine_name?: string
   language?: string | null
   dev_size: number
   holdout_size: number
