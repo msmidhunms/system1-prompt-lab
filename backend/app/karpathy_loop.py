@@ -105,7 +105,8 @@ def build_system_prompt(task: Task, metric: str, calibrate: bool, use_serp: bool
         '- "instructions": the question the model answers.',
         '- "criteria": one description per label. The label names and their number are fixed.',
     ]
-    if task.question_type == "noul":
+    # Only Laya has a native yes/no question; the other models choose between the two descriptions.
+    if task.question_type == "noul" and engine_id == engines.LAYA:
         no, yes = labels
         question_lines.append(
             f'  This is a yes/no question for Laya: the instructions must be a question whose answer is yes for "{yes}" '

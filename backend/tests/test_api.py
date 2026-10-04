@@ -9,7 +9,7 @@ client = TestClient(app)
 def evaluate(**body):
     """Start an evaluation, wait for it and return its full result."""
     started = client.post("/api/evaluate", json=body).json()
-    assert started["status"] == "running"
+    assert started["status"] in ("queued", "running")
     wait_for_background_work()
     return client.get(f"/api/evaluations/{started['eval_id']}").json()
 
@@ -114,3 +114,57 @@ def test_import_runs_in_the_background_and_reports_status(monkeypatch):
     assert tasks["toxicity"]["import_status"] == {"status": "failed", "message": "offline"}
     assert "test_db.json" in tasks["search_intent"]["setup_hint"]
     assert client.get("/api/activity").json() == {"loop": None, "evaluations": [], "imports": []}
+
+
+def test_comparison_runs_the_same_sample_on_each_model(router, monkeypatch):
+    import numpy as np
+    from app import engines
+
+    for text, label in [("sports one", "sports"), ("business two", "business"), ("world three", "world")]:
+        client.post("/api/golden-data", json={"task": "news_topic", "text": text, "label": label})
+
+    seen = []
+
+    def fake(engine_id, texts, instructions, descriptions, on_progress=None, chunk=32):
+        seen.append((engine_id, tuple(texts), tuple(descriptions)))
+        # This "model" always answers the first label.
+        return np.tile([0.7, 0.1, 0.1, 0.1], (len(texts), 1))
+
+    monkeypatch.setattr(engines, "predict_proba", fake)
+    assert client.post("/api/compare", json={"task": "news_topic", "engines": ["laya"]}).status_code == 400
+    assert client.post("/api/compare", json={"task": "news_topic", "engines": ["laya", "nope"]}).status_code == 400
+
+    started = client.post("/api/compare", json={"task": "news_topic", "engines": ["laya", "gliclass"], "sample_size": 10}).json()
+    assert [s["engine"] for s in started] == ["laya", "gliclass"] and len({s["comparison_id"] for s in started}) == 1
+    wait_for_background_work()
+
+    (comparison,) = client.get("/api/comparisons", params={"task": "news_topic"}).json()
+    by_engine = {r["engine"]: r for r in comparison["runs"]}
+    assert not comparison["active"] and {r["status"] for r in comparison["runs"]} == {"completed"}
+    assert by_engine["laya"]["accuracy"] == 1.0          # the stub Laya reads the label named in the text
+    assert by_engine["gliclass"]["accuracy"] == 0.3333   # the fake model always says "world"
+    assert by_engine["gliclass"]["ms_per_item"] is not None
+    # The other model was given plain text (not a JSON state) and the descriptions in label order.
+    engine_id, texts, descriptions = seen[-1]
+    assert engine_id == "gliclass" and set(texts) == {"sports one", "business two", "world three"}
+    assert descriptions[1].startswith("sport")
+    assert len(client.get("/api/engines").json()) == 7
+
+
+def test_a_version_keeps_its_model_and_can_be_run_on_another(router):
+    from app import versions
+    from app.database import SessionLocal
+    from app.laya_inference import on_engine
+    from app.tasks.registry import get_task
+
+    task = get_task("news_topic")
+    db = SessionLocal()
+    try:
+        versions.create(db, task, "news_nli", {**task.default_config, "engine": "nli_xsmall", "label_bias": {"world": 0.5}})
+    finally:
+        db.close()
+    config = versions.load_config("news_nli", task)
+    assert config["engine"] == "nli_xsmall" and "model" not in config
+    moved = on_engine(config, "laya")
+    assert "engine" not in moved and "label_bias" not in moved, "a bias fitted on one model does not carry to another"
+    assert on_engine(config, None) is config and on_engine(config, "nli_xsmall") is config
