@@ -3,8 +3,9 @@ import './App.css'
 import SERPAnalysis from './components/SERPAnalysis'
 import KarpathyLoop from './components/KarpathyLoop'
 import KeywordAnalysis from './components/KeywordAnalysis'
+import Evaluation from './components/Evaluation'
 
-type Page = 'serp' | 'karpathy' | 'keywords'
+type Page = 'serp' | 'karpathy' | 'keywords' | 'evaluation'
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>('serp')
@@ -27,6 +28,12 @@ function App() {
             Keywords & Intents
           </button>
           <button
+            className={`nav-button ${currentPage === 'evaluation' ? 'active' : ''}`}
+            onClick={() => setCurrentPage('evaluation')}
+          >
+            Model Evaluation
+          </button>
+          <button
             className={`nav-button ${currentPage === 'karpathy' ? 'active' : ''}`}
             onClick={() => setCurrentPage('karpathy')}
           >
@@ -37,6 +44,7 @@ function App() {
       <main>
         {currentPage === 'serp' && <SERPAnalysis />}
         {currentPage === 'keywords' && <KeywordAnalysis />}
+        {currentPage === 'evaluation' && <Evaluation />}
         {currentPage === 'karpathy' && <KarpathyLoop />}
       </main>
     </div>
