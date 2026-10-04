@@ -293,16 +293,26 @@ def _log(run: Dict[str, Any], message: str) -> None:
         f.write(line + "\n")
 
 
-def _append_results_tsv(run_id: str, iteration: int, metrics: Optional[Dict[str, Any]], status: str, description: str) -> None:
+def _append_results_tsv(run: Dict[str, Any], iteration: int, metrics: Optional[Dict[str, Any]], status: str, description: str) -> None:
     if not RESULTS_TSV.exists():
         RESULTS_TSV.write_text(
-            "timestamp\trun_id\titeration\tdev_accuracy\tmacro_f1\tstatus\tdescription\tscore\n", encoding="utf-8"
+            "timestamp\trun_id\titeration\tdev_accuracy\tmacro_f1\tstatus\tdescription\tscore\ttask\n", encoding="utf-8"
         )
     accuracy, macro_f1, score = (f"{metrics[k]:.4f}" if metrics else "0.0000" for k in ("accuracy", "macro_f1", "score"))
     description = " ".join(description.split())
     with open(RESULTS_TSV, "a", encoding="utf-8") as f:
-        # score is the last column so lines written before it existed still line up.
-        f.write(f"{_now()}\t{run_id}\t{iteration}\t{accuracy}\t{macro_f1}\t{status}\t{description}\t{score}\n")
+        # score and task are the last columns so lines written before they existed still line up.
+        # A line without a task belongs to the search-intent example.
+        f.write(f"{_now()}\t{run['run_id']}\t{iteration}\t{accuracy}\t{macro_f1}\t{status}\t{description}\t{score}\t{run['task']}\n")
+
+
+def _with_task(run: Dict[str, Any]) -> Dict[str, Any]:
+    """Fill in the task fields of a run saved before there were several examples."""
+    run.setdefault("task", DEFAULT_TASK_ID)
+    if "labels" not in run:
+        task = TASKS.get(run["task"])
+        run["labels"] = list(task.labels) if task else list(run["best_config"]["criteria"])
+    return run
 
 
 def get_run(run_id: str) -> Optional[Dict[str, Any]]:
@@ -318,19 +328,20 @@ def get_run(run_id: str) -> Optional[Dict[str, Any]]:
     # A run still marked running on disk belonged to a server process that has gone away.
     if run["status"] == "running":
         run["status"] = "interrupted"
-    return run
+    return _with_task(run)
 
 
-def list_runs() -> List[Dict[str, Any]]:
-    """Summaries of all runs on disk, newest first."""
+def list_runs(task_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Summaries of the runs on disk, newest first. With task_id, only that example's runs."""
     summaries = []
     for run_dir in sorted(RUNS_DIR.iterdir(), reverse=True):
         run = get_run(run_dir.name) if run_dir.is_dir() else None
-        if not run:
+        if not run or (task_id and run["task"] != task_id):
             continue
         baseline = run.get("baseline") or {}
         summaries.append({
             "run_id": run["run_id"],
+            "task": run["task"],
             "status": run["status"],
             "started_at": run["started_at"],
             "finished_at": run.get("finished_at"),
@@ -353,6 +364,14 @@ def active_run_id() -> Optional[str]:
         return _active_run_id
 
 
+def active_run() -> Optional[Dict[str, str]]:
+    """The run in progress, if any, and the example it belongs to."""
+    with _state_lock:
+        if _active_run_id is None:
+            return None
+        return {"run_id": _active_run_id, "task": _runs[_active_run_id]["task"]}
+
+
 def request_stop(run_id: str) -> bool:
     event = _stop_events.get(run_id)
     if not event:
@@ -362,6 +381,7 @@ def request_stop(run_id: str) -> bool:
 
 
 def start_run(
+    task: Task,
     examples: List[Dict[str, str]],
     llm_config: Dict[str, Any],
     loops: int,
@@ -373,13 +393,14 @@ def start_run(
     calibrate: bool,
     use_serp: bool,
     laya_model: str,
-    language: str,
-    excluded_other_language: int,
+    excluded_other_language: int = 0,
 ) -> Dict[str, Any]:
-    """Create a run and start it on a background thread. Only one run at a time."""
+    """Create a run and start it on a background thread. Only one run at a time, across all examples."""
     global _active_run_id
     if metric not in METRICS:
         raise ValueError(f"metric must be one of {list(METRICS)}")
+    if use_serp and not task.supports_serp:
+        raise ValueError(f"The example '{task.name}' has no search-result context")
     if use_serp and not serp.available():
         raise ValueError(f"SERP context needs {serp.SERP_FILE}, which was not found")
     dev, holdout = split_examples(examples, sample_size, seed)
@@ -387,11 +408,15 @@ def start_run(
         raise ValueError("Not enough labelled data for a dev set")
 
     # The run's checkpoint replaces the start version's, and any saved bias is refitted or dropped.
-    baseline_config, _ = validate_config({**start_config, "model": laya_model})
+    baseline_config, _ = validate_config({**start_config, "model": laya_model}, task)
 
     run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     run = {
         "run_id": run_id,
+        "task": task.id,
+        # Kept with the run so it still renders if the example's definition changes later.
+        "labels": list(task.labels),
+        "items": task.items,
         "status": "running",
         "phase": "baseline",
         "started_at": _now(),
@@ -404,7 +429,7 @@ def start_run(
         "calibrate": calibrate,
         "use_serp": use_serp,
         "laya_model": laya_model,
-        "language": language,
+        "language": task.language,
         "excluded_other_language": excluded_other_language,
         "keep_confidence": KEEP_CONFIDENCE,
         "dev_size": len(dev),
@@ -436,19 +461,22 @@ def start_run(
     _persist(run)
 
     thread = threading.Thread(
-        target=_run_loop, args=(run, dev, holdout, llm_config), name=f"karpathy-{run_id}", daemon=True
+        target=_run_loop, args=(run, task, dev, holdout, llm_config), name=f"karpathy-{run_id}", daemon=True
     )
     thread.start()
     return get_run(run_id)
 
 
-def _run_loop(run: Dict[str, Any], dev: List[Dict[str, str]], holdout: List[Dict[str, str]], llm_config: Dict[str, Any]) -> None:
+def _run_loop(
+    run: Dict[str, Any], task: Task, dev: List[Dict[str, str]], holdout: List[Dict[str, str]], llm_config: Dict[str, Any]
+) -> None:
     global _active_run_id
     run_id = run["run_id"]
     run_dir = RUNS_DIR / run_id
     stop = _stop_events[run_id]
     metric, calibrate, use_serp = run["metric"], run["calibrate"], run["use_serp"]
-    system_prompt = build_system_prompt(metric, calibrate, use_serp)
+    labels, k = task.labels, len(task.labels)
+    system_prompt = build_system_prompt(task, metric, calibrate, use_serp)
 
     def update(**fields):
         with _state_lock:
@@ -456,25 +484,26 @@ def _run_loop(run: Dict[str, Any], dev: List[Dict[str, str]], holdout: List[Dict
         _persist(run)
 
     try:
-        _log(run, f"Golden queries in language '{run['language']}' only: "
-                  f"{run['excluded_other_language']} in other languages excluded")
-        _log(run, f"Run started: {len(dev)} dev / {len(holdout)} holdout queries, {run['loops']} rounds, "
+        if task.language:
+            _log(run, f"Golden {task.items} in language '{task.language}' only: "
+                      f"{run['excluded_other_language']} in other languages excluded")
+        _log(run, f"Run started for '{task.name}': {len(dev)} dev / {len(holdout)} holdout {task.items}, {run['loops']} rounds, "
                   f"LLM {llm_config['provider']}:{llm_config['model'] or 'default'}, Laya {run['laya_model']}, "
                   f"objective {metric}, calibration {'on' if calibrate else 'off'}, SERP {'on' if use_serp else 'off'}")
 
-        baseline_config, best_metrics = evaluate(run["baseline_config"], dev, metric, fit_bias=calibrate)
+        baseline_config, best_metrics = evaluate(run["baseline_config"], dev, task, metric, fit_bias=calibrate)
         best_config = baseline_config
-        y = _gold_array(best_metrics)
+        y = gold_array(best_metrics, labels)
         _write_json(run_dir / "iter_000_baseline.json", {
             "iteration": 0, "status": "baseline", "config": best_config, "metrics": best_metrics,
         })
         _write_json(run_dir / "best_config.json", {"iteration": 0, "score": best_metrics["score"], "config": best_config})
-        _append_results_tsv(run_id, 0, best_metrics, "baseline", f"baseline ({run['start_version']})")
+        _append_results_tsv(run, 0, best_metrics, "baseline", f"baseline ({run['start_version']})")
         update(baseline=summarise(best_metrics), baseline_config=baseline_config, best_config=best_config,
                best_score=best_metrics["score"], best_accuracy=best_metrics["accuracy"],
                best_macro_f1=best_metrics["macro_f1"], phase="looping")
         _log(run, f"Baseline: score {best_metrics['score']:.4f}, accuracy {best_metrics['accuracy']:.4f}, "
-                  f"macro-F1 {best_metrics['macro_f1']:.4f}, predicted {_counts_line(best_metrics['predicted_counts'])}")
+                  f"macro-F1 {best_metrics['macro_f1']:.4f}, predicted {_counts_line(best_metrics['predicted_counts'], labels)}")
 
         history: List[Dict[str, Any]] = []
         consecutive_crashes = 0
@@ -485,7 +514,7 @@ def _run_loop(run: Dict[str, Any], dev: List[Dict[str, str]], holdout: List[Dict
                 break
 
             update(phase=f"round {i}: asking the LLM")
-            user_prompt = build_user_prompt(best_config, best_metrics, history, i, run["loops"], run["seed"], metric, use_serp)
+            user_prompt = build_user_prompt(task, best_config, best_metrics, history, i, run["loops"], run["seed"], metric, use_serp)
             with open(run_dir / f"iter_{i:03d}_prompt.txt", "w", encoding="utf-8") as f:
                 f.write(system_prompt + "\n\n-----\n\n" + user_prompt)
 
@@ -493,14 +522,14 @@ def _run_loop(run: Dict[str, Any], dev: List[Dict[str, str]], holdout: List[Dict
             raw_reply = None
             try:
                 raw_reply = llm.complete(llm_config, system_prompt, user_prompt)
-                candidate, hypothesis, warnings = parse_proposal(raw_reply, use_serp, run["laya_model"])
+                candidate, hypothesis, warnings = parse_proposal(raw_reply, task, use_serp, run["laya_model"])
             except (llm.LLMError, ValueError) as e:
                 consecutive_crashes += 1
                 entry.update(status="crash", error=str(e), hypothesis=None, config=None, score=None,
                              accuracy=None, macro_f1=None, delta_vs_best=None, p_better=None,
                              best_score=best_metrics["score"], warnings=[])
                 _write_json(run_dir / f"iter_{i:03d}.json", {**entry, "llm_reply": raw_reply})
-                _append_results_tsv(run_id, i, None, "crash", str(e))
+                _append_results_tsv(run, i, None, "crash", str(e))
                 history.append(entry)
                 with _state_lock:
                     run["iterations"].append(entry)
@@ -511,10 +540,10 @@ def _run_loop(run: Dict[str, Any], dev: List[Dict[str, str]], holdout: List[Dict
                 continue
             consecutive_crashes = 0
 
-            update(phase=f"round {i}: evaluating on {len(dev)} dev queries")
-            candidate, metrics = evaluate(candidate, dev, metric, fit_bias=calibrate)
+            update(phase=f"round {i}: evaluating on {len(dev)} dev {task.items}")
+            candidate, metrics = evaluate(candidate, dev, task, metric, fit_bias=calibrate)
             delta = round(metrics["score"] - best_metrics["score"], 4)
-            p_better = prob_better(y, _pred_array(metrics), _pred_array(best_metrics), metric, run["seed"] + i)
+            p_better = prob_better(y, pred_array(metrics, labels), pred_array(best_metrics, labels), metric, k, run["seed"] + i)
             kept = delta > 0 and p_better >= KEEP_CONFIDENCE
             status = "keep" if kept else "discard"
 
@@ -528,7 +557,7 @@ def _run_loop(run: Dict[str, Any], dev: List[Dict[str, str]], holdout: List[Dict
                          best_score=best_metrics["score"], predicted_counts=metrics["predicted_counts"],
                          per_class=metrics["per_class"], warnings=warnings)
             _write_json(run_dir / f"iter_{i:03d}.json", {**entry, "metrics": metrics, "llm_reply": raw_reply})
-            _append_results_tsv(run_id, i, metrics, status, hypothesis)
+            _append_results_tsv(run, i, metrics, status, hypothesis)
             history.append(entry)
             with _state_lock:
                 run["iterations"].append(entry)
@@ -538,15 +567,15 @@ def _run_loop(run: Dict[str, Any], dev: List[Dict[str, str]], holdout: List[Dict
             _persist(run)
             _log(run, f"Round {i}: {status.upper()} score {metrics['score']:.4f} ({delta:+.4f}, P(better)={p_better:.2f}), "
                       f"accuracy {metrics['accuracy']:.4f}, macro-F1 {metrics['macro_f1']:.4f}, "
-                      f"predicted {_counts_line(metrics['predicted_counts'])} - {hypothesis}")
+                      f"predicted {_counts_line(metrics['predicted_counts'], labels)} - {hypothesis}")
 
-        update(phase=f"scoring {len(holdout)} holdout queries")
+        update(phase=f"scoring {len(holdout)} holdout {task.items}")
         improved = run["best_iteration"] > 0
         # The bias fitted on dev is applied as is: nothing is fitted on the holdout.
-        _, holdout_baseline = evaluate(baseline_config, holdout, metric, fit_bias=False)
-        holdout_best = evaluate(best_config, holdout, metric, fit_bias=False)[1] if improved else holdout_baseline
-        holdout_p = prob_better(_gold_array(holdout_best), _pred_array(holdout_best), _pred_array(holdout_baseline),
-                                metric, run["seed"]) if improved else None
+        _, holdout_baseline = evaluate(baseline_config, holdout, task, metric, fit_bias=False)
+        holdout_best = evaluate(best_config, holdout, task, metric, fit_bias=False)[1] if improved else holdout_baseline
+        holdout_p = prob_better(gold_array(holdout_best, labels), pred_array(holdout_best, labels),
+                                pred_array(holdout_baseline, labels), metric, k, run["seed"]) if improved else None
         _write_json(run_dir / "holdout_results.json", {"baseline": holdout_baseline, "best": holdout_best, "p_better": holdout_p})
         _log(run, f"Holdout: baseline score {holdout_baseline['score']:.4f} (accuracy {holdout_baseline['accuracy']:.4f}, "
                   f"macro-F1 {holdout_baseline['macro_f1']:.4f}), best score {holdout_best['score']:.4f} "
@@ -578,6 +607,7 @@ def _record_experiment(run: Dict[str, Any]) -> None:
     try:
         db.add(ExperimentRun(
             id=run["run_id"],
+            task_id=run["task"],
             baseline_model="laya",
             baseline_version=run["start_version"],
             baseline_accuracy=run["baseline"]["accuracy"],
