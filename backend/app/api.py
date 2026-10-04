@@ -404,6 +404,8 @@ def start_karpathy_loop(request: KarpathyLoopRequest, db: Session = Depends(get_
     except (ValueError, llm.LLMError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    if evaluations.comparison_running(db):
+        raise HTTPException(status_code=409, detail=evaluations.COMPARISON_BUSY)
     try:
         return karpathy_loop.start_run(
             task=task,
@@ -600,6 +602,8 @@ def run_evaluation(request: Optional[EvaluateRequest] = None, db: Session = Depe
         raise HTTPException(status_code=400, detail="Sample size must be between 10 and 10000")
     try:
         return evaluations.start(db, task, request.version, request.sample_size, request.seed, request.engine)
+    except evaluations.Busy as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -616,9 +620,16 @@ def run_comparison(request: CompareRequest, db: Session = Depends(get_db)):
     task = _task(request.task)
     if request.sample_size < 10 or request.sample_size > 10000:
         raise HTTPException(status_code=400, detail="Sample size must be between 10 and 10000")
+    if karpathy_loop.active_run_id() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="An optimizer run is in progress. A comparison times each model, so it has to run on its own.",
+        )
     try:
         chosen = [engines.get_engine(e)["id"] for e in request.engines] or list(engines.ENGINES)
         return evaluations.start_comparison(db, task, request.version, request.sample_size, request.seed, chosen)
+    except evaluations.Busy as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
