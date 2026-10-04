@@ -19,7 +19,7 @@ Pick the example in the header of the UI; every tab then works on that example. 
 
 The yes/no examples use Laya's native `noul` question type; the others use `choice`.
 
-Two of the datasets are weaker than the rest. `request_domain` is labelled by which source a request came from (MBPP, GSM8K, Dolly, SQL questions, Persona-Chat), so each label has its own writing style and the task is easy. `email_triage` has no separate phishing label, because the public "phishing" sets that were checked turned out to be ordinary spam.
+Two of the datasets are weaker than the rest. `request_domain` is labelled by which source a request came from (MBPP, GSM8K, Dolly, SQL questions, Persona-Chat), so a label can be recognised from its source's writing style rather than from what is being asked. `email_triage` has no separate phishing label, because the public "phishing" sets that were checked turned out to be ordinary spam.
 
 ### Importing the datasets
 
