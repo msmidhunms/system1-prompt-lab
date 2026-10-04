@@ -7,7 +7,7 @@ descriptions) instead of a training script:
     propose a change (LLM) -> evaluate on the dev set -> keep if the score
     improved by more than noise, otherwise discard -> repeat.
 
-Three things keep the loop honest on a small, imbalanced, noisy dataset:
+Three things keep the loop honest on a small, imbalanced dataset:
 
 - The objective defaults to the mean of accuracy and macro-F1, so a prompt that
   puts every query in the majority label does not look like progress.
@@ -88,7 +88,7 @@ def build_system_prompt(metric: str, calibrate: bool, use_serp: bool) -> str:
 
 The classifier is Laya, a fast non-autoregressive "System 1" model. It is not a chat LLM: in one forward pass it reads a state, a question's instructions and a short description of each option, and outputs a probability per option. It cannot reason step by step or follow long rule lists. It responds to the wording and the format of what it is given.
 
-The task is search-intent classification of search queries into exactly these labels: {", ".join(LABELS)}. The gold labels come from an SEO data provider and are noisy, and their conventions differ from the textbook definitions. Infer the real conventions from the gold examples you are shown.
+The task is search-intent classification of search queries into exactly these labels: {", ".join(LABELS)}. The gold labels were reviewed by hand against the standard definitions, using these conventions: questions, facts, people, news, entertainment and game content are informational; a named business, organisation, website, login page or event is navigational; researching products, services or businesses (reviews, comparisons, product categories, photos of a venue) is commercial; buying, booking, tickets, downloads and specific products sold in shops are transactional. The gold examples you are shown follow them.
 
 You may change these things, and nothing else:
 {chr(10).join(state_lines)}

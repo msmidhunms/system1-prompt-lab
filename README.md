@@ -79,6 +79,47 @@ Test cases are JSONL (one JSON object per line):
 
 Use `data/test_cases_sample.jsonl` as reference. **You should provide your own test cases in `data/test_cases.jsonl`**.
 
+## Golden Dataset Labels
+
+The golden dataset is `data/test_db.json` (1,000 search queries with their top results), imported into the `predictions` table with `backend/scripts/import_test_data.py`. Each row carries a primary intent (`main_intent`) and optional secondary intents (`foreign_intent`).
+
+The provider's intent labels were unreliable: an audit of 100 rows (`data/intent_label_audit_100.csv`) found about half the primary intents wrong or debatable, mostly plain information lookups labelled commercial or transactional. All 1,000 rows were therefore relabelled on 2026-10-04, each judged from the query and its top six results against one rubric. `data/intent_labels.csv` holds, for every row, the reviewed labels, the provider's original labels, and the kind of query the ruling was based on.
+
+```bash
+python backend/scripts/apply_intent_labels.py                      # apply the reviewed labels (already done)
+python backend/scripts/apply_intent_labels.py --restore-original   # put the provider's labels back
+```
+
+Both commands update `data/test_db.json` and the `predictions` table together. Only the two intent fields change.
+
+### Labelling rubric
+
+Judge from the query wording first and the top results second. One primary intent, up to two secondary intents.
+
+| Kind of query | Primary | Secondary |
+|---|---|---|
+| Questions, facts, how-to, meanings, news, weather, health, recipes, homework | informational | |
+| Lyrics, cast, recaps, game guides, memes, sports scores and stats, image lookups | informational | |
+| Film, show or game title; title + episode or chapter | informational | transactional (watch or buy), navigational |
+| Person name, with or without a disambiguator | informational | navigational |
+| Organisation + information it hosts (calendar, schedule, programme page, data table) | informational | navigational |
+| Ideas and trends for things people pay for; stock quotes; pre-purchase questions | informational | commercial |
+| Named business, venue, hotel or attraction, with or without a location | navigational | commercial |
+| Church, school, agency, public facility | navigational | informational |
+| Business + menu | navigational | commercial, informational |
+| Login, portal, a query containing a domain, organisation + jobs, phone number, address of a venue | navigational | informational or transactional |
+| Named event | navigational | transactional, informational |
+| Explicit destination site in the query (imdb, tiktok, a subreddit) | navigational | by the underlying need |
+| Reviews, "vs" for products, best, comparisons | commercial | |
+| Product category, branded category, merchandise, "[category] near me / in [city]" | commercial | transactional |
+| Specific product where results are mostly info, reviews or community; trading cards | commercial | informational, transactional |
+| Photos of a commercial venue; a menu item at a named chain | commercial | navigational, informational |
+| Specific product where results are mostly shops; part numbers; product at a named store | transactional | commercial, navigational |
+| Buy, for sale, where to buy, tickets, booking, appointment, subscription, coupon | transactional | commercial or navigational |
+| Download, install, printable, design assets, online tools; "watch / stream / full" | transactional | informational |
+
+"X reddit" keeps the underlying intent as primary with navigational as secondary, because Reddit is being used as a preferred source rather than a destination page.
+
 ## Key Concepts
 
 ### Model-Agnostic Adapter Pattern
@@ -280,6 +321,8 @@ Each file should export a `classify(query: str, serp: List[SERPResult]) -> Tuple
 
 ### `backend/scripts/`
 
+- `import_test_data.py`: Import `data/test_db.json` into the `predictions` table as the golden dataset.
+- `apply_intent_labels.py`: Apply (or restore) the reviewed intent labels in `data/intent_labels.csv`.
 - `classify.py`: CLI to classify a JSONL file with a given model+version.
 - `eval.py`: CLI to eval a single (model, version) pair.
 
