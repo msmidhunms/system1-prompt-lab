@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { Fragment, useState, useEffect, useRef } from 'react'
 import axios from 'axios'
 import LLMSettings, { apiError } from './LLMSettings'
 import '../styles/KarpathyLoop.css'
@@ -91,10 +91,14 @@ function ConfigView({ config, previous }: { config: PromptConfig; previous?: Pro
   const changed = (a: string, b: string | undefined) => previous !== undefined && a !== b
   return (
     <dl className="config-view">
-      <dt className={changed(config.state_template, previous?.state_template) ? 'changed' : ''}>state template</dt>
-      <dd>{config.state_template}</dd>
-      <dt className={changed(config.instructions, previous?.instructions) ? 'changed' : ''}>instructions</dt>
-      <dd>{config.instructions}</dd>
+      <div className="config-row">
+        <dt className={changed(config.state_template, previous?.state_template) ? 'changed' : ''}>state template</dt>
+        <dd>{config.state_template}</dd>
+      </div>
+      <div className="config-row">
+        <dt className={changed(config.instructions, previous?.instructions) ? 'changed' : ''}>instructions</dt>
+        <dd>{config.instructions}</dd>
+      </div>
       {LABELS.map((label) => (
         <div key={label} className="config-row">
           <dt className={changed(config.criteria[label], previous?.criteria[label]) ? 'changed' : ''}>{label}</dt>
@@ -392,9 +396,8 @@ export default function KarpathyLoop() {
                 </thead>
                 <tbody>
                   {run.iterations.map((iter, index) => (
-                    <>
+                    <Fragment key={iter.iteration}>
                       <tr
-                        key={iter.iteration}
                         className={`iteration-row ${iter.status}`}
                         onClick={() => setExpanded(expanded === iter.iteration ? null : iter.iteration)}
                       >
@@ -418,7 +421,7 @@ export default function KarpathyLoop() {
                         <td className="hypothesis">{iter.status === 'crash' ? iter.error : iter.hypothesis}</td>
                       </tr>
                       {expanded === iter.iteration && iter.config && (
-                        <tr key={`${iter.iteration}-detail`} className="iteration-detail">
+                        <tr className="iteration-detail">
                           <td colSpan={5}>
                             <p className="control-hint">Proposed prompt. Highlighted fields differ from the best prompt at the time.</p>
                             <ConfigView config={iter.config} previous={bestBefore(index)} />
@@ -430,7 +433,7 @@ export default function KarpathyLoop() {
                           </td>
                         </tr>
                       )}
-                    </>
+                    </Fragment>
                   ))}
                 </tbody>
               </table>

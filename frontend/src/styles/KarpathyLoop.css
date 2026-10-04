@@ -91,6 +91,7 @@
   flex-wrap: wrap;
   align-items: flex-end;
   margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
 }
 
 .loop-controls .control-group {
@@ -479,6 +480,302 @@
   line-height: 1.4;
 }
 
+.karpathy-loop .error-message,
+.karpathy-loop .success-message {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem;
+  border-radius: 6px;
+  font-size: 0.95em;
+}
+
+.karpathy-loop .error-message {
+  background: rgba(255, 107, 107, 0.12);
+  border: 1px solid rgba(255, 107, 107, 0.4);
+  color: #ff8787;
+}
+
+.karpathy-loop .success-message {
+  background: rgba(81, 207, 102, 0.12);
+  border: 1px solid rgba(81, 207, 102, 0.4);
+  color: #69db7c;
+}
+
+.llm-settings {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  padding: 1.5rem;
+}
+
+.llm-settings h3 {
+  margin-top: 0;
+  color: #646cff;
+}
+
+.llm-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.karpathy-loop .control-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.karpathy-loop .control-group label {
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 0.9em;
+  font-weight: 600;
+}
+
+.karpathy-loop .control-group input[type="text"],
+.karpathy-loop .control-group input[type="password"],
+.karpathy-loop .control-group select {
+  padding: 0.6rem 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.3);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 0.95em;
+  font-family: inherit;
+  min-width: 0;
+}
+
+.karpathy-loop .control-group input:focus,
+.karpathy-loop .control-group select:focus {
+  outline: none;
+  border-color: #646cff;
+}
+
+.karpathy-loop .control-group input:disabled,
+.karpathy-loop .control-group select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.llm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.secondary-btn,
+.cancel-btn {
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 0.9em;
+  cursor: pointer;
+  background: rgba(100, 108, 255, 0.15);
+  border: 1px solid rgba(100, 108, 255, 0.4);
+  color: inherit;
+}
+
+.cancel-btn {
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.secondary-btn:hover:not(:disabled) {
+  background: rgba(100, 108, 255, 0.3);
+}
+
+.secondary-btn:disabled,
+.cancel-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.stop-loop-btn {
+  padding: 0.6rem 2rem;
+  background: rgba(255, 107, 107, 0.15);
+  border: 1px solid rgba(255, 107, 107, 0.5);
+  border-radius: 8px;
+  color: #ff8787;
+  font-weight: 600;
+  font-size: 1em;
+  cursor: pointer;
+  height: fit-content;
+}
+
+.run-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.run-header h3 {
+  margin: 0;
+}
+
+.run-meta {
+  margin: 0.5rem 0 1.5rem;
+  font-size: 0.9em;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 0.15rem 0.6rem;
+  border-radius: 10px;
+  font-size: 0.8em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.status-badge.keep,
+.status-badge.completed {
+  background: rgba(81, 207, 102, 0.2);
+  color: #51cf66;
+}
+
+.status-badge.running {
+  background: rgba(100, 108, 255, 0.25);
+  color: #8c93ff;
+}
+
+.status-badge.crash,
+.status-badge.failed,
+.status-badge.interrupted {
+  background: rgba(255, 107, 107, 0.2);
+  color: #ff6b6b;
+}
+
+.progress-line {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.spinner.small {
+  width: 20px;
+  height: 20px;
+  border-width: 3px;
+  margin: 0;
+}
+
+.metric-value.small {
+  font-size: 1.15em;
+  line-height: 1.8;
+}
+
+.iterations-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92em;
+}
+
+.iterations-table th,
+.iterations-table td {
+  text-align: left;
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  vertical-align: top;
+}
+
+.iterations-table th {
+  color: rgba(255, 255, 255, 0.6);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.iterations-table td:not(.hypothesis) {
+  white-space: nowrap;
+}
+
+.iteration-row {
+  cursor: pointer;
+}
+
+.iteration-row:hover,
+.iteration-row.selected {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.iteration-row .best-badge {
+  margin-left: 0.5rem;
+}
+
+.iterations-table .accuracy-change {
+  margin-left: 0;
+}
+
+.iteration-row.discard .hypothesis,
+.iteration-row.crash .hypothesis {
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.iteration-detail td {
+  background: rgba(0, 0, 0, 0.2);
+  white-space: normal !important;
+}
+
+.best-config {
+  margin-top: 2rem;
+}
+
+.config-view {
+  margin: 0;
+  font-size: 0.92em;
+}
+
+.config-row {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 1rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.config-view dt {
+  color: rgba(255, 255, 255, 0.6);
+  font-weight: 600;
+}
+
+.config-view dt.changed {
+  color: #ffd43b;
+}
+
+.config-view dt.changed::after {
+  content: " (changed)";
+  font-weight: 400;
+}
+
+.config-view dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.warning-line {
+  margin: 0.5rem 0 0;
+  font-size: 0.9em;
+  color: #ffd43b;
+}
+
+.log-toggle {
+  margin-top: 1.5rem;
+}
+
+.run-log {
+  margin: 1rem 0 0;
+  padding: 1rem;
+  max-height: 320px;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 6px;
+  font-size: 0.82em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 @media (prefers-color-scheme: light) {
   .karpathy-loop .section {
     background: rgba(0, 0, 0, 0.02);
@@ -513,5 +810,59 @@
   .model-saving-section {
     background: linear-gradient(135deg, rgba(81, 207, 102, 0.05) 0%, rgba(100, 108, 255, 0.05) 100%);
     border-color: rgba(81, 207, 102, 0.2);
+  }
+
+  .karpathy-loop .control-group label,
+  .progress-line {
+    color: rgba(0, 0, 0, 0.75);
+  }
+
+  .karpathy-loop .control-group input[type="text"],
+  .karpathy-loop .control-group input[type="password"],
+  .karpathy-loop .control-group select,
+  .loop-controls input[type="number"] {
+    background: rgba(0, 0, 0, 0.05);
+    border-color: rgba(0, 0, 0, 0.15);
+    color: #213547;
+  }
+
+  .llm-settings,
+  .iterations-table th,
+  .iterations-table td,
+  .config-row {
+    border-color: rgba(0, 0, 0, 0.1);
+  }
+
+  .iterations-table th,
+  .config-view dt,
+  .run-meta,
+  .control-hint,
+  .iteration-row.discard .hypothesis,
+  .iteration-row.crash .hypothesis {
+    color: rgba(0, 0, 0, 0.6);
+  }
+
+  .config-view dt.changed,
+  .warning-line {
+    color: #b7791f;
+  }
+
+  .status-badge {
+    background: rgba(0, 0, 0, 0.08);
+    color: rgba(0, 0, 0, 0.65);
+  }
+
+  .iteration-detail td,
+  .run-log {
+    background: rgba(0, 0, 0, 0.05);
+  }
+
+  .iteration-row:hover,
+  .iteration-row.selected {
+    background: rgba(0, 0, 0, 0.04);
+  }
+
+  .cancel-btn {
+    border-color: rgba(0, 0, 0, 0.25);
   }
 }

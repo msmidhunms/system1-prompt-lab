@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import axios from 'axios'
 import '../styles/Evaluation.css'
 
@@ -49,10 +49,18 @@ const INTENT_COLORS: Record<string, string> = {
 export default function Evaluation() {
   const [model, setModel] = useState('laya')
   const [version, setVersion] = useState('v1_baseline')
+  const [versions, setVersions] = useState<string[]>(['v1_baseline'])
   const [sampleSize, setSampleSize] = useState(100)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<EvaluationResult | null>(null)
+
+  useEffect(() => {
+    axios
+      .get<{ version: string }[]>('http://localhost:8000/api/models')
+      .then((res) => setVersions(res.data.map((m) => m.version)))
+      .catch((err) => console.error('Failed to load model versions:', err))
+  }, [])
 
   const handleAnalyze = async () => {
     setLoading(true)
@@ -130,8 +138,9 @@ export default function Evaluation() {
               onChange={(e) => setVersion(e.target.value)}
               disabled={loading}
             >
-              <option value="v1_baseline">v1_baseline</option>
-              <option value="v2_improved">v2_improved</option>
+              {versions.map((v) => (
+                <option key={v} value={v}>{v}</option>
+              ))}
             </select>
           </div>
 
