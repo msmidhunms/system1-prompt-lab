@@ -59,6 +59,16 @@
   padding: 0.75rem;
   background: rgba(255, 255, 255, 0.05);
   border-radius: 6px;
+  transition: all 0.3s ease;
+}
+
+.stat:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.stat.highlight {
+  background: linear-gradient(135deg, rgba(81, 207, 102, 0.15) 0%, rgba(100, 108, 255, 0.15) 100%);
+  border: 1px solid rgba(81, 207, 102, 0.3);
 }
 
 .stat-label {
@@ -69,6 +79,10 @@
   font-weight: 600;
   font-size: 1.3em;
   color: #646cff;
+}
+
+.stat.highlight .stat-value {
+  color: #51cf66;
 }
 
 .start-loop-btn {

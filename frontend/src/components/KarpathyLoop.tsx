@@ -6,7 +6,15 @@ interface GoldenDataPoint {
   id: string
   query: string
   correct_intent: string
+  source: string
   feedback_count: number
+}
+
+interface GoldenDataStats {
+  imported_data: number
+  user_feedback_count: number
+  unique_feedback_queries: number
+  total_golden_data: number
 }
 
 interface LoopIteration {
@@ -28,6 +36,12 @@ interface ExperimentResult {
 
 export default function KarpathyLoop() {
   const [goldenData, setGoldenData] = useState<GoldenDataPoint[]>([])
+  const [stats, setStats] = useState<GoldenDataStats>({
+    imported_data: 0,
+    user_feedback_count: 0,
+    unique_feedback_queries: 0,
+    total_golden_data: 0,
+  })
   const [loading, setLoading] = useState(false)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -37,13 +51,22 @@ export default function KarpathyLoop() {
 
   useEffect(() => {
     loadGoldenData()
+    loadStats()
   }, [])
+
+  const loadStats = async () => {
+    try {
+      const response = await axios.get('http://localhost:8000/api/golden-data/stats')
+      setStats(response.data)
+    } catch (err) {
+      console.error('Failed to load stats:', err)
+    }
+  }
 
   const loadGoldenData = async () => {
     setLoading(true)
     setError(null)
     try {
-      // TODO: Replace with actual API endpoint
       const response = await axios.get('http://localhost:8000/api/golden-data')
       setGoldenData(response.data)
     } catch (err) {
@@ -129,27 +152,27 @@ export default function KarpathyLoop() {
 
         <div className="golden-data-summary">
           <h3>Golden Dataset Summary</h3>
-          {loading ? (
-            <p>Loading...</p>
-          ) : goldenData.length === 0 ? (
-            <p className="empty-message">
-              No feedback collected yet. Please go to SERP Analysis and add some feedback first.
-            </p>
-          ) : (
-            <div className="summary-stats">
-              <div className="stat">
-                <span className="stat-label">Total Data Points:</span>
-                <span className="stat-value">{goldenData.length}</span>
-              </div>
-              <div className="stat">
-                <span className="stat-label">Total Feedback Entries:</span>
-                <span className="stat-value">{goldenData.reduce((acc, d) => acc + d.feedback_count, 0)}</span>
-              </div>
+          <div className="summary-stats">
+            <div className="stat">
+              <span className="stat-label">Imported Keywords:</span>
+              <span className="stat-value">{stats.imported_data}</span>
             </div>
-          )}
+            <div className="stat">
+              <span className="stat-label">User Feedback Entries:</span>
+              <span className="stat-value">{stats.user_feedback_count}</span>
+            </div>
+            <div className="stat">
+              <span className="stat-label">Unique Feedback Queries:</span>
+              <span className="stat-value">{stats.unique_feedback_queries}</span>
+            </div>
+            <div className="stat highlight">
+              <span className="stat-label">Total Golden Data:</span>
+              <span className="stat-value">{stats.total_golden_data}</span>
+            </div>
+          </div>
         </div>
 
-        {goldenData.length > 0 && (
+        {stats.total_golden_data > 0 && (
           <button
             onClick={startKarpathyLoop}
             disabled={running}
