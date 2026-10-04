@@ -22,6 +22,7 @@ class PredictionRecord(Base):
     id = Column(String, primary_key=True)
     query = Column(String, nullable=False, index=True)
     predicted_intent = Column(String, nullable=False)
+    secondary_intents = Column(JSON, nullable=True)  # Store list of secondary intents
     confidence = Column(Float, nullable=False)
     model = Column(String, nullable=False)
     version = Column(String, nullable=False)

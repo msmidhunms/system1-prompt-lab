@@ -314,3 +314,74 @@ async def save_model(
         "accuracy": accuracy,
         "status": "saved"
     }
+
+
+@router.get("/keywords")
+async def get_keywords(
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db)
+):
+    """Get paginated list of keywords with their intents."""
+    if page < 1:
+        raise HTTPException(status_code=400, detail="Page must be >= 1")
+
+    if not 1 <= page_size <= 100:
+        raise HTTPException(status_code=400, detail="Page size must be between 1 and 100")
+
+    # Get total count
+    total_count = db.query(PredictionRecord).count()
+
+    # Calculate pagination
+    skip = (page - 1) * page_size
+
+    # Get paginated results
+    records = db.query(PredictionRecord).offset(skip).limit(page_size).all()
+
+    # Format response
+    items = []
+    for record in records:
+        secondary_intents = record.secondary_intents or []
+        items.append({
+            "id": record.id,
+            "keyword": record.query,
+            "main_intent": record.predicted_intent,
+            "secondary_intents": secondary_intents,
+            "confidence": record.confidence,
+            "model": record.model,
+            "version": record.version,
+            "created_at": record.created_at.isoformat() if record.created_at else None,
+        })
+
+    return {
+        "items": items,
+        "pagination": {
+            "current_page": page,
+            "page_size": page_size,
+            "total_items": total_count,
+            "total_pages": (total_count + page_size - 1) // page_size,
+        }
+    }
+
+
+@router.get("/keywords/stats")
+async def get_keywords_stats(db: Session = Depends(get_db)):
+    """Get statistics about keywords and intents."""
+    from sqlalchemy import func
+
+    total_keywords = db.query(PredictionRecord).count()
+
+    # Count by main intent
+    intent_counts = db.query(
+        PredictionRecord.predicted_intent,
+        func.count(PredictionRecord.id).label('count')
+    ).group_by(PredictionRecord.predicted_intent).all()
+
+    intent_distribution = {
+        intent: count for intent, count in intent_counts
+    }
+
+    return {
+        "total_keywords": total_keywords,
+        "intent_distribution": intent_distribution,
+    }
