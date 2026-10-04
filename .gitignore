@@ -75,3 +75,7 @@ autoresearch/__pycache__/
 data/test_db.json
 autoresearch/checkpoints/
 data/*.csv
+
+# Database backups and downloaded example datasets
+backend/data.db.bak-*
+data/tasks/
