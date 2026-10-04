@@ -385,3 +385,90 @@ async def get_keywords_stats(db: Session = Depends(get_db)):
         "total_keywords": total_keywords,
         "intent_distribution": intent_distribution,
     }
+
+
+@router.post("/evaluate")
+async def run_evaluation(
+    model: str = "laya",
+    version: str = "v1_baseline",
+    db: Session = Depends(get_db)
+):
+    """Run evaluation on all keywords in the database."""
+    from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix
+
+    # Get all keywords from database
+    records = db.query(PredictionRecord).filter(
+        PredictionRecord.version == "v1_test_data"
+    ).all()
+
+    if not records:
+        raise HTTPException(status_code=400, detail="No test data found in database")
+
+    true_labels = []
+    predicted_labels = []
+    per_case_results = []
+
+    for record in records:
+        # Get ground truth (main intent is our ground truth)
+        true_intent = record.predicted_intent
+        true_labels.append(true_intent)
+
+        # Run prediction on the keyword
+        pred_intent, confidence = classify_intent(record.query)
+        predicted_labels.append(pred_intent.value)
+
+        per_case_results.append({
+            "keyword": record.query,
+            "predicted": pred_intent.value,
+            "actual": true_intent,
+            "confidence": confidence,
+            "correct": pred_intent.value == true_intent
+        })
+
+    # Calculate metrics
+    accuracy = accuracy_score(true_labels, predicted_labels)
+
+    # Get all unique intents
+    all_intents = sorted(set(true_labels))
+
+    # Calculate per-class metrics
+    precision, recall, f1, support = precision_recall_fscore_support(
+        true_labels, predicted_labels, labels=all_intents, zero_division=0
+    )
+
+    per_class_metrics = {}
+    for intent, p, r, f, s in zip(all_intents, precision, recall, f1, support):
+        per_class_metrics[intent] = {
+            "precision": round(float(p), 3),
+            "recall": round(float(r), 3),
+            "f1": round(float(f), 3),
+            "support": int(s)
+        }
+
+    # Calculate confusion matrix
+    conf_matrix = confusion_matrix(true_labels, predicted_labels, labels=all_intents)
+    conf_matrix_dict = {}
+    for i, predicted_intent in enumerate(all_intents):
+        conf_matrix_dict[predicted_intent] = {}
+        for j, actual_intent in enumerate(all_intents):
+            conf_matrix_dict[predicted_intent][actual_intent] = int(conf_matrix[j, i])
+
+    # Find errors
+    errors = [r for r in per_case_results if not r["correct"]]
+    errors.sort(key=lambda x: x["confidence"], reverse=True)
+
+    eval_id = str(uuid.uuid4())
+
+    return {
+        "eval_id": eval_id,
+        "model": model,
+        "version": version,
+        "total_cases": len(records),
+        "accuracy": round(accuracy, 4),
+        "per_class_metrics": per_class_metrics,
+        "confusion_matrix": conf_matrix_dict,
+        "error_count": len(errors),
+        "error_rate": round(len(errors) / len(records), 4),
+        "top_errors": errors[:10],
+        "timestamp": datetime.utcnow().isoformat(),
+    }
