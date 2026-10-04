@@ -8,10 +8,19 @@ from typing import Optional
 import uuid
 import json
 
-from app.database import get_db, PredictionRecord, FeedbackRecord, ModelVersion, ExperimentRun
+from app import karpathy_loop, llm
+from app.database import get_db, PredictionRecord, FeedbackRecord, ModelVersion
 from app.tasks.intent.labels import SearchIntent
 from app.inference import classify_intent, classify_intent_v2
-from app.laya_inference import classify_with_laya, create_improved_questions
+from app.laya_inference import (
+    BASELINE_VERSION,
+    DEFAULT_CONFIG,
+    checkpoint_path,
+    classify_with_laya,
+    load_version_config,
+    predict_batch,
+    save_checkpoint,
+)
 
 router = APIRouter(prefix="/api", tags=["api"])
 
@@ -35,17 +44,33 @@ class FeedbackRequest(BaseModel):
 
 
 class KarpathyLoopRequest(BaseModel):
-    golden_data_ids: Optional[list] = None
     loops: int = 10
-    baseline_model: str = "laya"
-    baseline_version: str = "v1_baseline"
+    sample_size: int = 200
+    seed: int = 42
+    start_version: str = BASELINE_VERSION
 
 
 class SaveModelRequest(BaseModel):
     model_name: str
-    base_version: str
-    accuracy: float
+    run_id: str
     description: Optional[str] = None
+
+
+class EvaluateRequest(BaseModel):
+    model: str = "laya"
+    version: str = "v1_baseline"
+
+
+class LLMConfigRequest(BaseModel):
+    provider: str
+    model: Optional[str] = None
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    clear_api_key: bool = False
+
+
+class LLMProviderRequest(BaseModel):
+    provider: Optional[str] = None
 
 
 @router.post("/predict")
@@ -64,7 +89,11 @@ async def predict(
     # Use Laya-based classifier if model is 'laya'
     if model == "laya":
         try:
-            predicted_intent, confidence = classify_with_laya(query)
+            config = load_version_config(version)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        try:
+            predicted_intent, confidence = classify_with_laya(query, config)
         except Exception as e:
             print(f"Laya classification failed: {e}, falling back to keyword-based")
             predicted_intent, confidence = classify_intent(query)
@@ -144,9 +173,8 @@ async def submit_feedback(
     }
 
 
-@router.get("/golden-data")
-async def get_golden_data(db: Session = Depends(get_db)):
-    """Get all golden dataset (imported keywords + user feedback)."""
+def build_golden_data(db: Session) -> list:
+    """Golden dataset: imported keywords, with user feedback corrections applied on top."""
     # Get imported test data
     test_data = db.query(PredictionRecord).filter(
         PredictionRecord.version == "v1_test_data"
@@ -205,6 +233,12 @@ async def get_golden_data(db: Session = Depends(get_db)):
     return result
 
 
+@router.get("/golden-data")
+async def get_golden_data(db: Session = Depends(get_db)):
+    """Get all golden dataset (imported keywords + user feedback)."""
+    return build_golden_data(db)
+
+
 @router.get("/golden-data/stats")
 async def get_golden_data_stats(db: Session = Depends(get_db)):
     """Get statistics about the golden dataset."""
@@ -228,188 +262,7 @@ async def get_golden_data_stats(db: Session = Depends(get_db)):
     }
 
 
-@router.post("/karpathy-loop")
-async def run_karpathy_loop(
-    request: KarpathyLoopRequest,
-    sample_size: int = 100,
-    db: Session = Depends(get_db)
-):
-    """Run Karpathy loop with LLM-based iterative improvements to model criteria."""
-    golden_data_ids = request.golden_data_ids
-    loops = request.loops
-    baseline_model = request.baseline_model
-    baseline_version = request.baseline_version
-
-    if not golden_data_ids or len(golden_data_ids) == 0:
-        raise HTTPException(status_code=400, detail="No golden data provided")
-
-    if loops < 1 or loops > 100:
-        raise HTTPException(status_code=400, detail="Loops must be between 1 and 100")
-
-    if sample_size < 10 or sample_size > 10000:
-        raise HTTPException(status_code=400, detail="Sample size must be between 10 and 10000")
-
-    # Get test data for evaluation
-    test_records = db.query(PredictionRecord).filter(
-        PredictionRecord.version == "v1_test_data"
-    ).limit(sample_size).all()
-
-    if not test_records:
-        raise HTTPException(status_code=400, detail="No test data available")
-
-    # Calculate baseline accuracy using Laya with default questions
-    correct_baseline = 0
-    baseline_questions = create_improved_questions(0)
-
-    for record in test_records:
-        try:
-            pred_intent, _ = classify_with_laya(record.query, baseline_questions)
-        except:
-            pred_intent, _ = classify_intent(record.query)
-        true_intent = record.predicted_intent
-        pred_value = pred_intent.value if hasattr(pred_intent, 'value') else str(pred_intent)
-        if pred_value == true_intent:
-            correct_baseline += 1
-
-    baseline_accuracy = correct_baseline / len(test_records)
-
-    # Run iterations with improved questions/criteria
-    iterations = []
-    best_accuracy = baseline_accuracy
-    best_iteration = 0
-    current_accuracy = baseline_accuracy
-    previous_accuracy = baseline_accuracy
-
-    for i in range(1, loops + 1):
-        # Get improved questions for this iteration
-        improved_questions = create_improved_questions(i)
-        correct_improved = 0
-
-        for record in test_records:
-            try:
-                pred_intent, _ = classify_with_laya(record.query, improved_questions)
-            except:
-                pred_intent, _ = classify_intent_v2(record.query) if i % 2 == 0 else classify_intent(record.query)
-
-            true_intent = record.predicted_intent
-            pred_value = pred_intent.value if hasattr(pred_intent, 'value') else str(pred_intent)
-            if pred_value == true_intent:
-                correct_improved += 1
-
-        current_accuracy = correct_improved / len(test_records)
-        accuracy_change = (current_accuracy - previous_accuracy) * 100
-
-        # Describe what improved in this iteration
-        improvements = []
-        if i == 2:
-            improvements.append("Refined commercial intent detection")
-        elif i == 3:
-            improvements.append("Enhanced transactional intent criteria")
-        elif i == 4:
-            improvements.append("Improved navigational intent boundaries")
-        elif i == 5:
-            improvements.append("Better informational intent patterns")
-        else:
-            improvements.append("Iterative criteria refinement")
-
-        iterations.append({
-            "iteration": i,
-            "model_version": f"{baseline_version}_improved_v{i}",
-            "accuracy": round(current_accuracy, 4),
-            "accuracy_change": round(accuracy_change, 2),
-            "improvements": improvements,
-            "criteria_version": f"questions_v{i}",
-            "timestamp": datetime.utcnow().isoformat(),
-        })
-
-        if current_accuracy > best_accuracy:
-            best_accuracy = current_accuracy
-            best_iteration = i
-
-        previous_accuracy = current_accuracy
-
-    # Determine if there's improvement
-    improved = best_accuracy > baseline_accuracy + 0.005  # At least 0.5% improvement
-    best_model_name = f"{baseline_model}_v{best_iteration}_improved" if improved else baseline_version
-
-    # Store experiment results
-    exp_id = str(uuid.uuid4())
-    experiment = ExperimentRun(
-        id=exp_id,
-        baseline_model=baseline_model,
-        baseline_version=baseline_version,
-        baseline_accuracy=round(baseline_accuracy, 4),
-        final_accuracy=round(current_accuracy, 4),
-        best_iteration=best_iteration,
-        best_model_name=best_model_name,
-        improved=improved,
-        iterations_data=json.dumps(iterations),
-    )
-    db.add(experiment)
-    db.commit()
-
-    return {
-        "experiment_id": exp_id,
-        "baseline_accuracy": round(baseline_accuracy, 4),
-        "final_accuracy": round(current_accuracy, 4),
-        "best_iteration": best_iteration,
-        "best_model_name": best_model_name,
-        "improved": improved,
-        "iterations": iterations,
-        "sample_size": len(test_records),
-        "total_golden_data": db.query(PredictionRecord).filter(PredictionRecord.version == "v1_test_data").count(),
-    }
-
-
-@router.post("/save-model")
-async def save_model(
-    request: SaveModelRequest,
-    db: Session = Depends(get_db)
-):
-    """Save an improved model."""
-    model_name = request.model_name
-    base_version = request.base_version
-    accuracy = request.accuracy
-    description = request.description
-
-    if not model_name or not model_name.strip():
-        raise HTTPException(status_code=400, detail="Model name cannot be empty")
-
-    if not 0 <= accuracy <= 1:
-        raise HTTPException(status_code=400, detail="Accuracy must be between 0 and 1")
-
-    # Check if model already exists
-    existing = db.query(ModelVersion).filter(
-        ModelVersion.version == model_name
-    ).first()
-
-    if existing:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Model version '{model_name}' already exists"
-        )
-
-    # Save model
-    model = ModelVersion(
-        id=str(uuid.uuid4()),
-        model_name=model_name.split("_")[0],  # Extract base name
-        version=model_name,
-        accuracy=accuracy,
-        base_version=base_version,
-        description=description,
-    )
-    db.add(model)
-    db.commit()
-
-    return {
-        "model_id": model.id,
-        "model_name": model_name,
-        "accuracy": accuracy,
-        "status": "saved"
-    }
-
-
-@router.get("/keywords")
+@@LOOP@@@router.get("/keywords")
 async def get_keywords(
     page: int = 1,
     page_size: int = 20,
