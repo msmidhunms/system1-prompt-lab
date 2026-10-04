@@ -1,87 +1,108 @@
-# System-1 Model Experiments: SERP Intent Classification
+# System-1 Model Experiments
 
-A reusable experiment harness for evaluating System-1 models on the task of classifying search intent from SERP (Search Engine Results Page) results. Starting with Laya, extensible to other models.
+An experiment harness for Laya, a fast non-autoregressive "System 1" classifier. Each **example** is a classification task with a golden dataset. For any example you can try single inputs, edit the golden dataset, evaluate a prompt version, and run a Karpathy loop in which an LLM rewrites the prompt Laya is given and keeps only what scores better.
 
-## Overview
+## Examples
 
-This project implements a complete ML experiment loop:
+Pick the example in the header of the UI; every tab then works on that example. They are defined in `backend/app/tasks/registry.py`.
 
-1. **Inference**: Run a model (Laya, and later others) on test queries to classify search intent.
-2. **Feedback**: Interactively mark predictions as correct/wrong, with top-N confidence-ranked results.
-3. **Evaluation**: Run eval across multiple model versions and compare accuracy/metrics.
-4. **Karpathy Loop**: Automated iterative improvement (edit classifier → eval → keep if accuracy ↑ → revert else).
-5. **Frontend**: Visualize results, compare model versions, inspect per-case differences.
+| Example | Input | Labels | Golden data |
+|---|---|---|---|
+| `search_intent` | search query | informational, navigational, commercial, transactional | `data/test_db.json`, 1,000 queries, labels reviewed by hand |
+| `support_routing` | customer message | card, card_payment, transfer, top_up, cash_withdrawal, account | Banking77 (`mteb/banking77`), 77 intents grouped into 6 |
+| `prompt_injection` | prompt | benign, injection (yes/no) | `xTRam1/safe-guard-prompt-injection` |
+| `question_type` | question | abbreviation, description, entity, human, location, number | TREC coarse classes (`SetFit/TREC-QC`) |
+| `news_topic` | news article | world, sports, business, sci_tech | AG News (`fancyzhx/ag_news`) |
+| `email_triage` | email subject and body | legitimate, spam (yes/no) | seven email corpora (`puyang2025/seven-phishing-email-datasets`) |
+| `toxicity` | comment | not_toxic, toxic (yes/no) | Jigsaw Wikipedia comments (`OxAISH-AL-LLM/wiki_toxic`, balanced) |
+| `request_domain` | request to an LLM | code, math_or_logic, writing, factual_lookup, data_analysis, chitchat | six public datasets, one per label |
+
+The yes/no examples use Laya's native `noul` question type; the others use `choice`.
+
+Two of the datasets are weaker than the rest. `request_domain` is labelled by which source a request came from (MBPP, GSM8K, Dolly, SQL questions, Persona-Chat), so each label has its own writing style and the task is easy. `email_triage` has no separate phishing label, because the public "phishing" sets that were checked turned out to be ordinary spam.
+
+### Importing the datasets
+
+The seven new examples download their data from Hugging Face. 2,000 rows are sampled per example (seeded), kept under `data/tasks/` (gitignored) and reused on later imports.
+
+```bash
+python backend/scripts/import_dataset.py --task all
+python backend/scripts/import_dataset.py --task support_routing --rows 3000 --refresh
+```
+
+The Golden Dataset tab has an **Import dataset** button that does the same for an example with no rows. An import never overwrites a row that is already in the golden dataset.
+
+### Adding an example
+
+1. Add a `Task` to `backend/app/tasks/registry.py`: its state field, labels, default prompt and the paragraph the Karpathy loop is told about the task.
+2. Add a loader to `backend/app/tasks/sources.py` if the data is downloadable, or add rows by hand in the Golden Dataset tab.
+
+Nothing else is example-specific: inference, scoring, the loop, the API and the UI all read the registry.
 
 ## Architecture
 
 ```
-backend/              Python FastAPI + SQLite
+backend/                  Python FastAPI + SQLite (backend/data.db)
   app/
-    main.py           FastAPI app, routes
-    config.py         Settings (env-based)
-    models/           Model adapters (abstract + implementations)
+    main.py               FastAPI app
+    api.py                All routes; each takes the example as `task`
+    config.py             Settings (env-based)
+    database.py           Tables: golden_rows, evaluation_runs, predictions, feedback,
+                          model_versions, experiment_runs, app_settings
     tasks/
-      intent/         Intent labels, schemas, task-specific logic
-    classifiers/      Versioned classifier files (v1_baseline.py, v2_*.py, ...)
-    eval/             Eval runner, metrics, storage
-    api/              API routes
-  scripts/            CLI tools (classify.py, eval.py)
-  tests/              Unit tests
-  requirements.txt    Python dependencies
+      registry.py         The examples
+      sources.py          Dataset loaders and the import
+      intent/             Search-intent label enum and schemas
+    laya_inference.py     Prompt configs, Laya calls, saved versions
+    scoring.py            Accuracy, macro-F1, label-bias fit, paired bootstrap
+    golden.py             Golden rows: list, add-or-update, edit
+    karpathy_loop.py      The autoresearch loop
+    llm.py                The LLM that proposes prompts
+    serp.py               Search-result context for search intent
+  scripts/
+    import_dataset.py     Import an example's golden dataset
+    import_test_data.py   Same, for search intent only
+    apply_intent_labels.py  Apply the reviewed search-intent labels
+    migrate_to_tasks.py   One-off migration to the multi-example layout
+  tests/                  pytest
 
-frontend/             React + Vite + TypeScript
+frontend/                 React + Vite + TypeScript
   src/
-    pages/
-      Inference.tsx   Run model, mark right/wrong, show top-N
-      Results.tsx     Display top-N correct/wrong, drill into cases
-      Eval.tsx        Trigger eval runs
-      Compare.tsx     Version/model comparison dashboard
-    api.ts            API client
-    types.ts          TS types (mirror backend schemas)
+    api.ts                API client and shared types
+    TaskContext.tsx       The selected example
+    components/           TryIt, GoldenDataset, Evaluation, KarpathyLoop, LLMSettings
 
 data/
-  test_cases.jsonl    Test dataset (user-provided)
-  
+  test_db.json            Search-intent queries with their search results (gitignored)
+  tasks/                  Downloaded samples of the other examples (gitignored)
+
 autoresearch/
-  program.md          Agent instructions for Karpathy loop
-  loop.py             Loop driver
-  results.tsv         Iteration history
+  runs/<run_id>/          Everything a Karpathy loop run produced
+  checkpoints/            Saved prompt versions
+  results.tsv             One line per experiment
 ```
 
-## Intent Labels
+## The four tabs
 
-Search intent is classified into 4 categories:
+- **Try It**: classify one input with any saved version and mark the prediction right or wrong. Feedback that settles the label is written to the golden dataset.
+- **Golden Dataset**: browse, search, filter, edit and delete the example's labelled rows, and add new ones.
+- **Model Evaluation**: score a version on a seeded random sample of the golden dataset. Every evaluation is saved and listed under Past Evaluations.
+- **Karpathy Loop**: run the prompt autoresearch loop and open past runs.
 
-- **Informational**: User seeks knowledge/education (e.g., "how to", "what is").
-- **Navigational**: User seeks a specific website (e.g., "facebook login", "gmail").
-- **Commercial**: User researches products before purchase (e.g., "best laptop", "product reviews").
-- **Transactional**: User intends to complete a purchase/action (e.g., "buy laptop", "download pdf").
+### Adding a golden row
 
-## Data Format
+A row is identified by its example and its input. When a row is added, the input is compared with the existing ones ignoring upper/lower case and extra spaces: if it is already there, that row's label is updated; otherwise a new row is created. The response says which happened (`status: "created"` or `"updated"`, with `previous_label`).
 
-Test cases are JSONL (one JSON object per line):
-
-```json
-{
-  "id": "case_001",
-  "query": "how to make chocolate cake",
-  "serp": [
-    {
-      "title": "Easy Chocolate Cake Recipe - Tasty",
-      "url": "https://www.tastyrecipes.com/chocolate-cake",
-      "snippet": "Learn how to make a delicious chocolate cake..."
-    },
-    ...
-  ],
-  "intent": "informational"
-}
+```bash
+curl -X POST localhost:8000/api/golden-data -H 'Content-Type: application/json' \
+  -d '{"task": "search_intent", "text": "best laptop 2024", "label": "commercial"}'
 ```
 
-Use `data/test_cases_sample.jsonl` as reference. **You should provide your own test cases in `data/test_cases.jsonl`**.
+Edits made in the UI change the database only. For search intent they are not written back to `data/test_db.json` or `data/intent_labels.csv`.
 
-## Golden Dataset Labels
+## Search Intent: Golden Dataset Labels
 
-The golden dataset is `data/test_db.json` (1,000 search queries with their top results), imported into the `predictions` table with `backend/scripts/import_test_data.py`. Each row carries a primary intent (`main_intent`), optional secondary intents (`foreign_intent`) and the language of the query (`extra.detected_language`, stored in the `language` column).
+The search-intent golden dataset is `data/test_db.json` (1,000 search queries with their top results), imported into the `golden_rows` table with `backend/scripts/import_test_data.py`. Each row carries a primary intent (`main_intent`), optional secondary intents (`foreign_intent`) and the language of the query (`extra.detected_language`, stored in the `language` column).
 
 The provider's intent labels were unreliable: an audit of 100 rows (`data/intent_label_audit_100.csv`) found about half the primary intents wrong or debatable, mostly plain information lookups labelled commercial or transactional. All 1,000 rows were therefore relabelled on 2026-10-04, each judged from the query and its top six results against one rubric. `data/intent_labels.csv` holds, for every row, the reviewed labels and language, the provider's original values, and the kind of query the ruling was based on.
 
@@ -92,7 +113,7 @@ python backend/scripts/apply_intent_labels.py                      # apply the r
 python backend/scripts/apply_intent_labels.py --restore-original   # put the provider's values back
 ```
 
-Both commands update `data/test_db.json` and the `predictions` table together. Only the two intent fields and the language field change.
+Both commands update `data/test_db.json` and the imported search-intent rows of the `golden_rows` table together. Only the two intent fields and the language field change. Rows added by hand or through feedback are left alone.
 
 ### Labelling rubric
 
@@ -124,54 +145,26 @@ Judge from the query wording first and the top results second. One primary inten
 
 ## Key Concepts
 
-### Model-Agnostic Adapter Pattern
-Each model (Laya, future ones) has an adapter in `backend/app/models/` implementing:
-- `load()`: Load model weights.
-- `predict(query, serp) -> (label, confidence)`: Infer intent + score.
-
-New models are registered in a central registry.
-
-### Versioned Classifiers
-Each classifier variant is a **single file** (e.g., `v1_baseline.py`, `v2_improved.py`) containing the core logic. This allows:
-- Git tracking per version.
-- Easy diff/comparison between versions.
-- Eval to record git commit SHA for reproducibility.
-- Karpathy loop to edit ONE file and keep/revert atomically.
-
-### Top-N Feedback
-After inference, extract:
-- **Top N correct**: Highest confidence predictions that match ground truth.
-- **Top N wrong**: Highest confidence predictions that don't match (most confident mistakes).
-
-This focuses feedback collection on edge cases and hard examples. Configurable via `TOP_N_FEEDBACK` env var (default: 5).
-
-### Eval Harness
-For each (model, version, test_set) triple, compute:
-- Overall accuracy.
-- Per-class precision, recall, F1.
-- Confusion matrix.
-- Per-case results (query, predicted, actual, confidence).
-
-Store in SQLite with git commit SHA for reproducibility.
-
 ### Karpathy Autoresearch Loop
-Modelled on [karpathy/autoresearch](https://github.com/karpathy/autoresearch), but the thing being edited is the **prompt Laya is given**, not code. A prompt config (`backend/app/laya_inference.py`) has these parts the LLM may rewrite:
+Modelled on [karpathy/autoresearch](https://github.com/karpathy/autoresearch), but the thing being edited is the **prompt Laya is given**, not code. It works the same way for every example. A prompt config (`backend/app/laya_inference.py`) has these parts the LLM may rewrite:
 
-- `state_template`: how the query is rendered into the state passed to `Router.predict`. A string, or an object of field → string that becomes a JSON state (the form Laya's presets use, with the instructions naming the field in backticks). With SERP context enabled it may also use `{serp_sites}`, `{serp_titles}` and `{serp_snippets}`, drawn from the top `serp_results` results in `data/test_db.json`.
+- `state_template`: how the input is rendered into the state passed to `Router.predict`. A string, or an object of field → string that becomes a JSON state (the form Laya's presets use, with the instructions naming the field in backticks). The input goes where the example's placeholder is: `{query}` for search intent, `{message}` for support routing, and so on. For search intent with SERP context enabled it may also use `{serp_sites}`, `{serp_titles}` and `{serp_snippets}`, drawn from the top `serp_results` results in `data/test_db.json`.
 - `instructions`: the question text.
-- `criteria`: one description per intent label (the labels themselves are fixed).
+- `criteria`: one description per label (the labels themselves are fixed). For a yes/no example these are the descriptions of the "no" and the "yes" side.
 
 Two more parts are set by the run, not the LLM: `model` (the Laya checkpoint: `typed-decisions`, `english`, `multilingual` or `auto`) and `label_bias` (per-label offsets fitted on the dev set).
 
 Each round (`backend/app/karpathy_loop.py`):
 1. An LLM is shown the current best config, its dev metrics, predicted-label counts, the confusion matrix, gold examples per label, a sample of misclassified queries and the experiment history, and proposes a new config.
 2. Laya is run with that config on the dev set.
-3. The config is scored by the run's objective. The default is the mean of accuracy and macro-F1, because on this imbalanced dataset plain accuracy rewards putting every query in the majority label.
+3. The config is scored by the run's objective (`backend/app/scoring.py`). The default is the mean of accuracy and macro-F1, because on an imbalanced dataset plain accuracy rewards putting every input in the majority label.
 4. With calibration on, a per-label bias is fitted on the dev set for every config, so a prompt that skews towards one label is judged by how well it separates the labels rather than by which label it favours. The bias is scored cross-fitted (fitted on one half, scored on the other) and is only used when it beats the plain argmax by more than noise.
 5. **Keep** only if the score is higher and a paired bootstrap over the dev queries gives at least 0.8 probability that the gain is real. Otherwise **discard**. An unusable LLM reply is a **crash**.
 6. Held-out queries (`EVAL_HOLDOUT_RATIO` of the golden data plus whatever the dev sample did not use, never shown to the LLM) are scored once at the end for the baseline and the best config.
 
-Laya keeps only the first 48 tokens of each label description, so the LLM is told to keep them short.
+Laya keeps only the first 48 tokens of each label description, and the instructions and all descriptions share about 190 tokens, so the LLM is told to keep them short (shorter still for six-label examples). Inputs longer than about 1,500 characters are cut before they reach Laya.
+
+Only one loop runs at a time, across all examples.
 
 Every run writes to `autoresearch/runs/<run_id>/` (gitignored):
 
@@ -180,16 +173,10 @@ Every run writes to `autoresearch/runs/<run_id>/` (gitignored):
 - `iter_NNN_prompt.txt`: the exact prompt sent to the LLM.
 - `best_config.json`, `holdout_results.json`, `dev_set.json`, `holdout_set.json`.
 
-One line per experiment is also appended to `autoresearch/results.tsv`. Saving a run's best prompt from the UI writes `autoresearch/checkpoints/<name>.json`; that name can then be used as `version` in `/api/predict` and `/api/evaluate`, or as the starting point of the next run. A saved prompt that uses SERP placeholders only has that context for queries in `data/test_db.json`.
+One line per experiment is also appended to `autoresearch/results.tsv`. Saving a run's best prompt from the UI writes `autoresearch/checkpoints/<name>.json`; that name can then be used as `version` in `/api/predict` and `/api/evaluate` for the same example, or as the starting point of its next run. Version names are unique across examples. A saved prompt that uses SERP placeholders only has that context for queries in `data/test_db.json`.
 
 ### LLM Configuration
 The LLM is chosen on the Karpathy Loop page and stored in the local SQLite DB (`backend/app/llm.py`). Supported: Claude (Anthropic API), OpenAI, Ollama, Google Gemini, any OpenAI-compatible endpoint (OpenRouter, Groq, LM Studio, vLLM, ...), and the Claude Code and Codex CLIs (which use their own login, no API key). API keys can be entered in the UI or supplied through `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` in the backend environment.
-
-### Cross-Model Comparison
-Eval can be run for any (model, version) combination. Frontend compare page groups results by model OR version, showing:
-- Accuracy table (rows: versions, cols: models).
-- Per-class metrics.
-- Case-level diffs (which cases did model A get right but model B got wrong?).
 
 ## Quick Start
 
@@ -241,200 +228,71 @@ npm run dev
 
 The frontend will run on `http://localhost:5173`.
 
+### Load the data
+
+```bash
+python backend/scripts/import_dataset.py --task all
+```
+
+A database created before the examples existed is upgraded once with `python backend/scripts/migrate_to_tasks.py`. It backs the database up to `backend/data.db.bak-pre-tasks`, moves the search-intent golden rows from the `predictions` table into `golden_rows`, applies the recorded feedback on top, and leaves live predictions where they are. Runs under `autoresearch/runs/` and saved versions need no migration: anything without an example recorded belongs to `search_intent`.
+
 ## Workflows
 
-### 1. Inference + Feedback
+### Evaluate a version
 
-1. Open frontend → **Inference** page.
-2. Select model and version.
-3. Run inference on your test set.
-4. Inspect predictions.
-5. Mark results as correct/wrong or correct the label.
-6. System extracts top-N correct and top-N wrong by confidence.
-7. Feedback stored in SQLite.
-
-**CLI alternative**:
-```bash
-python scripts/classify.py --model laya --version v1_baseline --input data/test_cases.jsonl --output results.jsonl
-```
-
-### 2. Evaluate a Single Version
+Model Evaluation tab, or:
 
 ```bash
-python scripts/eval.py --model laya --version v1_baseline --test-file data/test_cases.jsonl
+curl -X POST localhost:8000/api/evaluate -H 'Content-Type: application/json' \
+  -d '{"task": "support_routing", "version": "v1_baseline", "sample_size": 200}'
+curl 'localhost:8000/api/evaluations?task=support_routing'      # past evaluations
 ```
 
-Produces metrics JSON and stores in DB.
+### Karpathy loop
 
-### 3. Compare Versions (Same Model)
-
-Frontend → **Compare** page → Select model "laya" → See accuracy, confusion matrices across versions.
-
-### 4. Compare Models (Same Version)
-
-Frontend → **Compare** page → Select version "v1_baseline" → See accuracy, confusion matrices across all models.
-
-### 5. Karpathy Loop (Autoresearch)
-
-1. Open frontend → **Karpathy Loop** page.
+1. Open the **Karpathy Loop** tab for the example.
 2. Pick the LLM provider and model, then **Save and test**.
 3. Set the dev set size, the number of rounds, the version to start from, the Laya checkpoint and the objective, then start the loop.
 4. Watch each round arrive as keep / discard / crash. Click a round to see the prompt it proposed.
 5. When the run ends, compare dev and holdout accuracy and save the best prompt as a named version.
 
-**API alternative**:
 ```bash
 curl -X POST localhost:8000/api/karpathy-loop -H 'Content-Type: application/json' \
-  -d '{"loops": 10, "sample_size": 400, "start_version": "v1_baseline", "laya_model": "typed-decisions", "metric": "balanced", "calibrate": true, "use_serp": false}'
+  -d '{"task": "support_routing", "loops": 10, "sample_size": 400, "start_version": "v1_baseline", "laya_model": "typed-decisions", "metric": "balanced", "calibrate": true}'
 curl localhost:8000/api/karpathy-loop/runs/<run_id>
 ```
 
-## Project Structure in Detail
-
-### `backend/app/models/`
-
-- `base.py`: Abstract `ModelAdapter` class.
-- `registry.py`: Model registry (mapping name → adapter class).
-- `laya.py`: Laya-specific adapter (loads HF model, tokenizes, infers).
-
-### `backend/app/tasks/intent/`
-
-- `labels.py`: `SearchIntent` enum with all 4 labels.
-- `schema.py`: Pydantic schemas for test cases, predictions, feedback, eval runs.
-- `__init__.py`: Package exports.
-
-### `backend/app/classifiers/`
-
-- `v1_baseline.py`: Initial classifier (e.g., wrap Laya model directly).
-- `v2_*.py`: Subsequent versions (prompt engineering, fine-tuning config, etc.).
-
-Each file should export a `classify(query: str, serp: List[SERPResult]) -> Tuple[SearchIntent, float]` function.
-
-### `backend/app/eval/`
-
-- `runner.py`: `EvalRunner` class; computes accuracy, per-class metrics, confusion matrix, case results.
-- `store.py`: SQLAlchemy models for runs, predictions, feedback; CRUD functions.
-
-### `backend/app/api/`
-
-- `cases.py`: Endpoints for `/cases` (list, upload, get by ID).
-- `infer.py`: Endpoints for `/infer` (run inference on a case or set).
-- `feedback.py`: Endpoints for `/feedback` (submit user feedback).
-- `eval.py`: Endpoints for `/eval`, `/runs`, `/compare` (trigger eval, fetch results).
-
-### `backend/scripts/`
-
-- `import_test_data.py`: Import `data/test_db.json` into the `predictions` table as the golden dataset.
-- `apply_intent_labels.py`: Apply (or restore) the reviewed intent labels and languages in `data/intent_labels.csv`.
-- `classify.py`: CLI to classify a JSONL file with a given model+version.
-- `eval.py`: CLI to eval a single (model, version) pair.
-
-### `autoresearch/`
-
-- `program.md`: Instructions for the autoresearch agent (Karpathy loop logic).
-- `loop.py`: Driver script that orchestrates git edits, eval, revert logic, logging.
-- `results.tsv`: Tab-separated log of iterations (timestamp, model, version, dev_accuracy, holdout_accuracy, action).
-
-### `frontend/`
-
-Vite + React + TypeScript. Pages:
-
-- **Inference.tsx**: Form to select model+version, input query/SERP, display prediction, mark feedback.
-- **Results.tsx**: Show top-N correct/wrong from latest run, drill into individual cases.
-- **Eval.tsx**: Trigger eval run for selected model+version, stream results.
-- **Compare.tsx**: Multi-version or multi-model comparison dashboard (accuracy table, confusion matrices, per-case diffs).
-
 ## API Endpoints (Summary)
 
-### Cases
-- `GET /cases` — List all test cases.
-- `POST /cases` — Upload test cases (JSONL).
-- `GET /cases/{case_id}` — Get a specific case.
+Every endpoint takes the example as `task` (query parameter on GET, body field on POST). Leaving it out means `search_intent`. Full docs: `http://localhost:8000/docs`.
 
-### Inference
-- `POST /infer` — Run inference on a case or batch.
-  - Request: `{model: str, version: str, case_id: str}` or `case_ids: List[str]`.
-  - Response: `[{case_id, predicted_intent, confidence, ...}]`.
-
-### Feedback
-- `POST /feedback` — Submit user feedback.
-  - Request: `{case_id, model, version, feedback: "correct" | "wrong" | "<label>", ...}`.
-  - Response: `{success: bool}`.
-
-### Evaluation
-- `POST /eval` — Trigger eval run.
-  - Request: `{model: str, version: str}`.
-  - Response: `{run_id: str, ...metrics...}`.
-- `GET /runs` — List eval runs.
-- `GET /runs/{run_id}` — Get specific run results.
-- `GET /compare` — Compare results across versions or models.
-  - Query: `?model=laya&versions=v1_baseline,v2_improved` OR `?version=v1_baseline&models=laya,gpt4`.
-  - Response: Grouped metrics for comparison.
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/tasks` | The examples, their labels and golden row counts |
+| `POST /api/tasks/{task}/import` | Import the example's dataset |
+| `POST /api/predict` | Classify one input |
+| `POST /api/feedback` | Record feedback; updates the golden dataset when it settles the label |
+| `GET /api/golden-data` | One page of golden rows (`page`, `page_size`, `q`, `label`, `source`) |
+| `GET /api/golden-data/stats` | Row counts by label, source and language |
+| `POST /api/golden-data` | Add a row, or update the row with the same input |
+| `PUT /api/golden-data/{id}`, `DELETE /api/golden-data/{id}` | Edit or delete a row |
+| `POST /api/evaluate` | Evaluate a version and save the result |
+| `GET /api/evaluations`, `GET /api/evaluations/{id}` | Past evaluations |
+| `POST /api/karpathy-loop` | Start a loop |
+| `GET /api/karpathy-loop/runs`, `GET /api/karpathy-loop/runs/{id}` | Past and current runs |
+| `POST /api/karpathy-loop/runs/{id}/stop` | Stop after the current round |
+| `GET /api/models`, `POST /api/save-model` | Saved prompt versions |
+| `GET/PUT /api/llm/config`, `POST /api/llm/test`, `POST /api/llm/models` | LLM settings |
 
 ## Testing
-
-Run pytest:
 
 ```bash
 cd backend
 pytest tests/ -v
 ```
 
-Tests should cover:
-- Model adapters (mock inference).
-- Schema validation.
-- Eval metrics (accuracy, confusion matrix computation).
-- Top-N selection logic.
-
-## Next Steps (Phases)
-
-1. ✅ **Phase 1: Scaffold + data contract** (this document).
-   - You: Review schema, layout, labels. Provide sample test cases if different from `test_cases_sample.jsonl`.
-
-2. **Phase 2: Laya adapter + v1_baseline** (next).
-   - We: Implement Laya model adapter and first classifier version.
-   - You: Test with sample queries; verify inference works.
-
-3. **Phase 3: Inference loop + feedback + top-N API** (phase 3).
-   - We: Implement FastAPI endpoints, SQLite storage.
-   - You: curl/CLI walkthrough.
-
-4. **Phase 4: Eval harness + multi-version** (phase 4).
-   - We: Implement eval runner and comparison endpoints.
-   - You: Create 2nd version (v2), run eval, verify metrics.
-
-5. **Phase 5: Frontend** (phase 5).
-   - We: Build React pages (inference, results, eval, compare).
-   - You: Click through UI.
-
-6. **Phase 6: Karpathy loop** (phase 6).
-   - We: Implement autoresearch loop driver.
-   - You: Run dry-run (3 iterations); review kept/reverted changes.
-
-7. **Phase 7: Second model stub** (phase 7).
-   - We: Add stub adapter for a second model.
-   - You: Verify cross-model comparison works.
-
-## Contributing
-
-When adding a new model:
-
-1. Create `backend/app/models/<model_name>.py` with a class inheriting from `ModelAdapter`.
-2. Implement `load()` and `predict(query, serp) -> (label, confidence)`.
-3. Register in `backend/app/models/registry.py`.
-4. Provide test cases or adapt existing ones for that model's input format.
-5. Run eval to benchmark against Laya.
-
-When improving the classifier:
-
-1. Create a new file `backend/app/classifiers/v<N>_<description>.py`.
-2. Implement the classify function with your improvements (e.g., prompt engineering, post-processing).
-3. Optionally use the autoresearch loop to iterate.
+The tests use a throwaway database (`DB_PATH`) and a stub in place of the Laya model.
 
 ## License
 
 (To be determined)
-
-## Questions?
-
-See `docs/` (to be added) or reach out!
