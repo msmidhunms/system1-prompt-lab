@@ -6,7 +6,6 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 from typing import Optional
 import uuid
-import json
 
 from app import karpathy_loop, llm
 from app.database import get_db, PredictionRecord, FeedbackRecord, ModelVersion
@@ -262,7 +261,208 @@ async def get_golden_data_stats(db: Session = Depends(get_db)):
     }
 
 
-@@LOOP@@@router.get("/keywords")
+@router.post("/karpathy-loop")
+def start_karpathy_loop(request: KarpathyLoopRequest, db: Session = Depends(get_db)):
+    """Start a Karpathy loop: an LLM iteratively rewrites the Laya prompt, keeping what scores better."""
+    if request.loops < 1 or request.loops > 100:
+        raise HTTPException(status_code=400, detail="Loops must be between 1 and 100")
+
+    if request.sample_size < 20 or request.sample_size > 10000:
+        raise HTTPException(status_code=400, detail="Sample size must be between 20 and 10000")
+
+    examples = [
+        {"query": d["query"], "intent": d["correct_intent"]}
+        for d in build_golden_data(db)
+        if d["correct_intent"] in SearchIntent.all_labels()
+    ]
+    if len(examples) < 20:
+        raise HTTPException(status_code=400, detail="Need at least 20 labelled golden examples")
+
+    try:
+        start_config = load_version_config(request.start_version)
+        llm_config = llm.resolve_config(db)
+    except (ValueError, llm.LLMError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        return karpathy_loop.start_run(
+            examples=examples,
+            llm_config=llm_config,
+            loops=request.loops,
+            sample_size=request.sample_size,
+            seed=request.seed,
+            start_config=start_config,
+            start_version=request.start_version,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/karpathy-loop/runs")
+def list_karpathy_runs():
+    """List all Karpathy loop runs (newest first) and the one currently running, if any."""
+    return {"active_run_id": karpathy_loop.active_run_id(), "runs": karpathy_loop.list_runs()}
+
+
+@router.get("/karpathy-loop/runs/{run_id}")
+def get_karpathy_run(run_id: str):
+    """Get the full state of a run: baseline, every iteration, best config, holdout scores, log."""
+    run = karpathy_loop.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
+
+
+@router.post("/karpathy-loop/runs/{run_id}/stop")
+def stop_karpathy_run(run_id: str):
+    """Ask a running loop to stop after the current round."""
+    if not karpathy_loop.request_stop(run_id):
+        raise HTTPException(status_code=404, detail="Run is not in progress")
+    return {"status": "stopping"}
+
+
+@router.get("/llm/config")
+def get_llm_config(db: Session = Depends(get_db)):
+    """Get the LLM providers and the current settings (API keys are never returned)."""
+    return llm.public_config(db)
+
+
+@router.put("/llm/config")
+def update_llm_config(request: LLMConfigRequest, db: Session = Depends(get_db)):
+    """Save settings for a provider and make it the active one."""
+    try:
+        llm.update_config(
+            db,
+            provider=request.provider,
+            model=request.model,
+            base_url=request.base_url,
+            api_key=request.api_key,
+            clear_api_key=request.clear_api_key,
+        )
+    except llm.LLMError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return llm.public_config(db)
+
+
+@router.post("/llm/test")
+def test_llm(request: LLMProviderRequest, db: Session = Depends(get_db)):
+    """Send a tiny prompt to the saved LLM settings to check they work."""
+    try:
+        config = llm.resolve_config(db, request.provider)
+        reply = llm.complete(config, "You are a connection test.", "Reply with the single word: ok")
+    except llm.LLMError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "provider": config["provider"], "model": config["model"], "reply": reply.strip()[:200]}
+
+
+@router.post("/llm/models")
+def list_llm_models(request: LLMProviderRequest, db: Session = Depends(get_db)):
+    """List the models the provider serves, using the saved settings."""
+    try:
+        config = llm.resolve_config(db, request.provider)
+        return {"models": llm.list_models(config)}
+    except llm.LLMError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/models")
+async def list_models(db: Session = Depends(get_db)):
+    """List the baseline plus every saved model version."""
+    saved = db.query(ModelVersion).order_by(ModelVersion.created_at.desc()).all()
+    versions = [{
+        "version": BASELINE_VERSION,
+        "accuracy": None,
+        "base_version": None,
+        "description": "Default Laya prompt",
+        "created_at": None,
+        "config": DEFAULT_CONFIG,
+    }]
+    for model in saved:
+        try:
+            config = load_version_config(model.version)
+        except ValueError:
+            continue  # row without a checkpoint file (saved before prompts were stored)
+        versions.append({
+            "version": model.version,
+            "accuracy": model.accuracy,
+            "base_version": model.base_version,
+            "description": model.description,
+            "created_at": model.created_at.isoformat() if model.created_at else None,
+            "config": config,
+        })
+    return versions
+
+
+@router.post("/save-model")
+async def save_model(
+    request: SaveModelRequest,
+    db: Session = Depends(get_db)
+):
+    """Save the best prompt found by a Karpathy loop run as a named model version."""
+    model_name = request.model_name.strip()
+
+    if not model_name:
+        raise HTTPException(status_code=400, detail="Model name cannot be empty")
+
+    run = karpathy_loop.get_run(request.run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    if run["status"] == "running":
+        raise HTTPException(status_code=400, detail="Run is still in progress")
+
+    if run["best_accuracy"] is None:
+        raise HTTPException(status_code=400, detail="Run has no evaluated config to save")
+
+    try:
+        path = checkpoint_path(model_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    existing = db.query(ModelVersion).filter(
+        ModelVersion.version == model_name
+    ).first()
+
+    if existing or path.exists() or model_name == BASELINE_VERSION:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model version '{model_name}' already exists"
+        )
+
+    save_checkpoint(model_name, {
+        "version": model_name,
+        "config": run["best_config"],
+        "run_id": run["run_id"],
+        "best_iteration": run["best_iteration"],
+        "base_version": run["start_version"],
+        "dev_accuracy": run["best_accuracy"],
+        "holdout_accuracy": run["holdout"]["best"]["accuracy"] if run.get("holdout") else None,
+        "llm": run["llm"],
+        "saved_at": datetime.utcnow().isoformat(),
+    })
+
+    model = ModelVersion(
+        id=str(uuid.uuid4()),
+        model_name="laya",
+        version=model_name,
+        accuracy=run["best_accuracy"],
+        base_version=run["start_version"],
+        description=request.description,
+    )
+    db.add(model)
+    db.commit()
+
+    return {
+        "model_id": model.id,
+        "model_name": model_name,
+        "accuracy": run["best_accuracy"],
+        "status": "saved"
+    }
+
+
+@router.get("/keywords")
 async def get_keywords(
     page: int = 1,
     page_size: int = 20,
@@ -334,7 +534,8 @@ async def get_keywords_stats(db: Session = Depends(get_db)):
 
 
 @router.post("/evaluate")
-async def run_evaluation(
+def run_evaluation(
+    request: Optional[EvaluateRequest] = None,
     model: str = "laya",
     version: str = "v1_baseline",
     sample_size: int = 100,
@@ -342,6 +543,9 @@ async def run_evaluation(
 ):
     """Run evaluation on keywords in the database with configurable sample size."""
     from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix
+
+    if request is not None:
+        model, version = request.model, request.version
 
     if sample_size < 10 or sample_size > 10000:
         raise HTTPException(status_code=400, detail="Sample size must be between 10 and 10000")
@@ -354,32 +558,38 @@ async def run_evaluation(
     if not records:
         raise HTTPException(status_code=400, detail="No test data found in database")
 
+    # Run prediction on every keyword based on model
+    if model == "laya":
+        try:
+            config = load_version_config(version)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        predictions = [
+            (p["intent"], p["confidence"])
+            for p in predict_batch([record.query for record in records], config)
+        ]
+    else:
+        predictions = [
+            (intent.value, confidence)
+            for intent, confidence in (classify_intent(record.query) for record in records)
+        ]
+
     true_labels = []
     predicted_labels = []
     per_case_results = []
 
-    for record in records:
+    for record, (pred_intent, confidence) in zip(records, predictions):
         # Get ground truth (main intent is our ground truth)
         true_intent = record.predicted_intent
         true_labels.append(true_intent)
-
-        # Run prediction on the keyword based on model
-        if model == "laya":
-            try:
-                pred_intent, confidence = classify_with_laya(record.query)
-            except:
-                pred_intent, confidence = classify_intent(record.query)
-        else:
-            pred_intent, confidence = classify_intent(record.query)
-
-        predicted_labels.append(pred_intent.value)
+        predicted_labels.append(pred_intent)
 
         per_case_results.append({
             "keyword": record.query,
-            "predicted": pred_intent.value,
+            "predicted": pred_intent,
             "actual": true_intent,
             "confidence": confidence,
-            "correct": pred_intent.value == true_intent
+            "correct": pred_intent == true_intent
         })
 
     # Calculate metrics
