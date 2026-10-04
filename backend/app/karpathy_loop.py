@@ -19,6 +19,10 @@ Three things keep the loop honest on a small, imbalanced dataset:
 - A candidate replaces the best only when a paired bootstrap over the dev examples
   says it is better with KEEP_CONFIDENCE probability.
 
+Each time a run finds a better prompt it saves it as the run's own model version, so the
+best prompt so far is never lost to a stopped, failed or interrupted run. A run whose LLM
+keeps failing stops proposing, but still scores what it found on the holdout.
+
 For a task with a language (search intent: EVAL_LANGUAGE, English by default) only golden
 rows in that language take part. The LLM only ever sees dev examples. Held-out examples (EVAL_HOLDOUT_RATIO of all
 golden data plus whatever the dev sample did not use) are scored once at the end
@@ -35,7 +39,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from app import llm, serp
+from app import llm, serp, versions
 from app.config import EVAL_HOLDOUT_RATIO, RESULTS_TSV, RUNS_DIR
 from app.database import ExperimentRun, SessionLocal
 from app.laya_inference import validate_config
@@ -309,6 +313,9 @@ def _append_results_tsv(run: Dict[str, Any], iteration: int, metrics: Optional[D
 def _with_task(run: Dict[str, Any]) -> Dict[str, Any]:
     """Fill in the task fields of a run saved before there were several examples."""
     run.setdefault("task", DEFAULT_TASK_ID)
+    # Failed runs used to leave `improved` unset even when a round had been kept.
+    if run.get("status") != "running" and (run.get("best_iteration") or 0) > 0:
+        run["improved"] = True
     if "labels" not in run:
         task = TASKS.get(run["task"])
         run["labels"] = list(task.labels) if task else list(run["best_config"]["criteria"])
@@ -442,6 +449,8 @@ def start_run(
         "best_macro_f1": None,
         "best_iteration": 0,
         "improved": False,
+        # The version this run's best prompt is saved under, once a round has been kept.
+        "auto_version": None,
         "iterations": [],
         "holdout": None,
         "error": None,
@@ -483,6 +492,28 @@ def _run_loop(
             run.update(fields)
         _persist(run)
 
+    def progress(label: str):
+        """A callback that puts "<label>: <done> / <total>" in the run's phase as Laya works through a set."""
+        def report(done: int, total: int) -> None:
+            with _state_lock:
+                run["phase"] = f"{label}: {done} / {total}"
+            if done == total:
+                _persist(run)
+        return report
+
+    def autosave() -> None:
+        """Save the run's best prompt as its model version. A failure here must not cost the run."""
+        db = SessionLocal()
+        try:
+            name = versions.autosave_run_best(db, task, run)
+            if run["auto_version"] != name:
+                update(auto_version=name)
+                _log(run, f"Best prompt saved as model version '{name}'")
+        except Exception as e:  # noqa: BLE001
+            _log(run, f"Could not save the best prompt as a model version: {e}")
+        finally:
+            db.close()
+
     try:
         if task.language:
             _log(run, f"Golden {task.items} in language '{task.language}' only: "
@@ -491,7 +522,8 @@ def _run_loop(
                   f"LLM {llm_config['provider']}:{llm_config['model'] or 'default'}, Laya {run['laya_model']}, "
                   f"objective {metric}, calibration {'on' if calibrate else 'off'}, SERP {'on' if use_serp else 'off'}")
 
-        baseline_config, best_metrics = evaluate(run["baseline_config"], dev, task, metric, fit_bias=calibrate)
+        baseline_config, best_metrics = evaluate(run["baseline_config"], dev, task, metric, fit_bias=calibrate,
+                                                 on_progress=progress("baseline"))
         best_config = baseline_config
         y = gold_array(best_metrics, labels)
         _write_json(run_dir / "iter_000_baseline.json", {
@@ -507,6 +539,7 @@ def _run_loop(
 
         history: List[Dict[str, Any]] = []
         consecutive_crashes = 0
+        failure: Optional[str] = None
 
         for i in range(1, run["loops"] + 1):
             if stop.is_set():
@@ -536,12 +569,16 @@ def _run_loop(
                 _persist(run)
                 _log(run, f"Round {i}: CRASH - {e}")
                 if consecutive_crashes >= MAX_CONSECUTIVE_CRASHES:
-                    raise RuntimeError(f"{MAX_CONSECUTIVE_CRASHES} rounds in a row failed. Last error: {e}")
+                    # Stop proposing, but keep what the run found: the holdout below needs only Laya.
+                    failure = f"{MAX_CONSECUTIVE_CRASHES} rounds in a row failed. Last error: {e}"
+                    _log(run, f"Stopping early: {failure}")
+                    break
                 continue
             consecutive_crashes = 0
 
             update(phase=f"round {i}: evaluating on {len(dev)} dev {task.items}")
-            candidate, metrics = evaluate(candidate, dev, task, metric, fit_bias=calibrate)
+            candidate, metrics = evaluate(candidate, dev, task, metric, fit_bias=calibrate,
+                                          on_progress=progress(f"round {i}: evaluating"))
             delta = round(metrics["score"] - best_metrics["score"], 4)
             p_better = prob_better(y, pred_array(metrics, labels), pred_array(best_metrics, labels), metric, k, run["seed"] + i)
             kept = delta > 0 and p_better >= KEEP_CONFIDENCE
@@ -568,12 +605,16 @@ def _run_loop(
             _log(run, f"Round {i}: {status.upper()} score {metrics['score']:.4f} ({delta:+.4f}, P(better)={p_better:.2f}), "
                       f"accuracy {metrics['accuracy']:.4f}, macro-F1 {metrics['macro_f1']:.4f}, "
                       f"predicted {_counts_line(metrics['predicted_counts'], labels)} - {hypothesis}")
+            if kept:
+                autosave()
 
         update(phase=f"scoring {len(holdout)} holdout {task.items}")
         improved = run["best_iteration"] > 0
         # The bias fitted on dev is applied as is: nothing is fitted on the holdout.
-        _, holdout_baseline = evaluate(baseline_config, holdout, task, metric, fit_bias=False)
-        holdout_best = evaluate(best_config, holdout, task, metric, fit_bias=False)[1] if improved else holdout_baseline
+        _, holdout_baseline = evaluate(baseline_config, holdout, task, metric, fit_bias=False,
+                                       on_progress=progress("holdout, starting prompt"))
+        holdout_best = evaluate(best_config, holdout, task, metric, fit_bias=False,
+                                on_progress=progress("holdout, best prompt"))[1] if improved else holdout_baseline
         holdout_p = prob_better(gold_array(holdout_best, labels), pred_array(holdout_best, labels),
                                 pred_array(holdout_baseline, labels), metric, k, run["seed"]) if improved else None
         _write_json(run_dir / "holdout_results.json", {"baseline": holdout_baseline, "best": holdout_best, "p_better": holdout_p})
@@ -585,16 +626,19 @@ def _run_loop(
         update(
             holdout={"baseline": summarise(holdout_baseline), "best": summarise(holdout_best), "p_better": holdout_p},
             improved=improved,
-            status="stopped" if stop.is_set() else "completed",
+            status="failed" if failure else "stopped" if stop.is_set() else "completed",
+            error=failure,
             phase="done",
             finished_at=_now(),
         )
+        if improved:
+            autosave()  # adds the holdout accuracy to the saved version
         _log(run, f"Run finished: dev score {run['baseline']['score']:.4f} -> {run['best_score']:.4f} "
                   f"(best round {run['best_iteration']})")
         _record_experiment(run)
     except Exception as e:  # noqa: BLE001 - a failed run must be recorded, not lost with the thread
         _log(run, f"Run failed: {e}")
-        update(status="failed", phase="done", error=str(e), finished_at=_now())
+        update(status="failed", phase="done", error=str(e), finished_at=_now(), improved=run["best_iteration"] > 0)
     finally:
         with _state_lock:
             _active_run_id = None

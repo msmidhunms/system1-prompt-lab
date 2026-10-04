@@ -49,6 +49,11 @@ class EvaluationRun(Base):
     accuracy = Column(Float, nullable=False)
     macro_f1 = Column(Float, nullable=False)
     result = Column(JSON, nullable=False)
+    # An evaluation runs in the background: 'running', then 'completed', 'failed' or 'interrupted'.
+    status = Column(String, nullable=False, default="completed")
+    progress_done = Column(Integer, default=0)
+    progress_total = Column(Integer, default=0)
+    error = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
@@ -99,6 +104,10 @@ class ModelVersion(Base):
     description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     is_baseline = Column(Boolean, default=False)
+    # 'auto' (an optimizer run's best, saved by the run), 'optimizer' (a round saved by hand) or 'manual'
+    source = Column(String, nullable=True, default="optimizer")
+    run_id = Column(String, nullable=True, index=True)
+    iteration = Column(Integer, nullable=True)
 
 
 class ExperimentRun(Base):
@@ -135,7 +144,18 @@ def _add_missing_columns():
     added = {
         "predictions": {"language": "VARCHAR", "task_id": f"VARCHAR NOT NULL DEFAULT '{DEFAULT_TASK_ID}'"},
         "feedback": {"task_id": f"VARCHAR NOT NULL DEFAULT '{DEFAULT_TASK_ID}'"},
-        "model_versions": {"task_id": f"VARCHAR NOT NULL DEFAULT '{DEFAULT_TASK_ID}'"},
+        "model_versions": {
+            "task_id": f"VARCHAR NOT NULL DEFAULT '{DEFAULT_TASK_ID}'",
+            "source": "VARCHAR DEFAULT 'optimizer'",
+            "run_id": "VARCHAR",
+            "iteration": "INTEGER",
+        },
+        "evaluation_runs": {
+            "status": "VARCHAR NOT NULL DEFAULT 'completed'",
+            "progress_done": "INTEGER DEFAULT 0",
+            "progress_total": "INTEGER DEFAULT 0",
+            "error": "TEXT",
+        },
         "experiment_runs": {"task_id": f"VARCHAR NOT NULL DEFAULT '{DEFAULT_TASK_ID}'"},
     }
     for table, columns in added.items():
@@ -144,7 +164,8 @@ def _add_missing_columns():
             for name, definition in columns.items():
                 if name not in existing:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {definition}"))
-                    conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table}_{name} ON {table} ({name})"))
+                    if name in ("task_id", "language", "run_id"):
+                        conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table}_{name} ON {table} ({name})"))
 
 
 _add_missing_columns()

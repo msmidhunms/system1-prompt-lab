@@ -144,7 +144,8 @@ def public_config(db: Session) -> Dict[str, Any]:
             "model": cfg["model"],
             "base_url": cfg["base_url"],
             "default_base_url": preset.get("base_url", ""),
-            "models": preset["models"],
+            # The list fetched from the provider, once it has been loaded; otherwise the built-in suggestions.
+            "models": raw["providers"].get(name, {}).get("models") or preset["models"],
             "needs_key": preset["needs_key"],
             "key_env": preset["key_env"],
             "api_key_set": cfg["api_key"] is not None,
@@ -162,6 +163,7 @@ def update_config(
     api_key: Optional[str] = None,
     clear_api_key: bool = False,
     make_active: bool = True,
+    models: Optional[List[str]] = None,
 ) -> None:
     """Store settings for one provider. A blank api_key leaves the stored key untouched."""
     if provider not in PROVIDERS:
@@ -177,6 +179,8 @@ def update_config(
         stored["api_key"] = api_key.strip()
     if clear_api_key:
         stored.pop("api_key", None)
+    if models is not None:
+        stored["models"] = list(models)
     providers[provider] = stored
     raw["providers"] = providers
     if make_active:

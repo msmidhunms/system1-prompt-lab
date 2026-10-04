@@ -16,19 +16,19 @@ versions of one task:
 The labels themselves are fixed by the task.
 """
 
-import json
 import re
 import threading
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
 from app import serp
-from app.config import CHECKPOINTS_DIR, LAYA_DEVICE
-from app.tasks.registry import DEFAULT_TASK_ID, Task
+from app.config import LAYA_DEVICE
+from app.tasks.registry import Task
 
 QUESTION_ID = "answer"
-BASELINE_VERSION = "v1_baseline"
+# Inputs go to Laya this many at a time, so a long run can report how far it is.
+PROGRESS_CHUNK = 64
 
 LAYA_MODELS = ["auto", "english", "multilingual", "typed-decisions"]
 SERP_PLACEHOLDERS = ["{serp_sites}", "{serp_titles}", "{serp_snippets}"]
@@ -58,8 +58,13 @@ def uses_serp(config: Dict[str, Any]) -> bool:
     return any(p in text for text in _template_strings(config["state_template"]) for p in SERP_PLACEHOLDERS)
 
 
-def validate_config(config: Dict[str, Any], task: Task, allow_serp: bool = True) -> Tuple[Dict[str, Any], List[str]]:
+def validate_config(
+    config: Dict[str, Any], task: Task, allow_serp: bool = True, keep_bias: bool = False
+) -> Tuple[Dict[str, Any], List[str]]:
     """Check a prompt config against a task and return (normalised config, warnings).
+
+    A label_bias in the config is dropped unless keep_bias is set: the optimizer fits its own,
+    so only a version written by hand carries one through.
 
     Raises ValueError when the config cannot be used at all.
     """
@@ -118,6 +123,16 @@ def validate_config(config: Dict[str, Any], task: Task, allow_serp: bool = True)
         if config["model"] not in LAYA_MODELS:
             raise ValueError(f"model must be one of {LAYA_MODELS}")
         normalised["model"] = config["model"]
+    if keep_bias and config.get("label_bias"):
+        bias = config["label_bias"]
+        if not isinstance(bias, dict) or set(bias) - set(labels):
+            raise ValueError(f"label_bias may only have these keys: {labels}")
+        try:
+            bias = {label: float(bias.get(label) or 0.0) for label in labels}
+        except (TypeError, ValueError):
+            raise ValueError("label_bias values must be numbers")
+        if any(bias.values()):
+            normalised["label_bias"] = bias
     return normalised, warnings
 
 
@@ -165,8 +180,17 @@ def _answer_probabilities(answer: Dict[str, Any], task: Task) -> List[float]:
     return [answer["probabilities"][label] for label in task.labels]
 
 
-def predict_proba(texts: List[str], config: Dict[str, Any], task: Task, batch_size: int = 32) -> np.ndarray:
-    """Laya's probability for each label (columns in task.labels order), one row per input."""
+def predict_proba(
+    texts: List[str],
+    config: Dict[str, Any],
+    task: Task,
+    batch_size: int = 32,
+    on_progress: Optional[Callable[[int, int], None]] = None,
+) -> np.ndarray:
+    """Laya's probability for each label (columns in task.labels order), one row per input.
+
+    on_progress(done, total) is called as the inputs are worked through.
+    """
     questions = build_questions(config, task)
     model = config.get("model", "auto")
     requests = []
@@ -175,7 +199,12 @@ def predict_proba(texts: List[str], config: Dict[str, Any], task: Task, batch_si
         if model != "auto":
             request["model"] = model
         requests.append(request)
-    results = get_router().predict_batch(requests, batch_size=batch_size, sort_by_length=True)
+    router = get_router()
+    results = []
+    for start in range(0, len(requests), PROGRESS_CHUNK):
+        results += router.predict_batch(requests[start:start + PROGRESS_CHUNK], batch_size=batch_size, sort_by_length=True)
+        if on_progress:
+            on_progress(len(results), len(requests))
     return np.array(
         [_answer_probabilities(result["answers"][QUESTION_ID], task) for result in results], dtype=float
     ).reshape(len(texts), len(task.labels))
@@ -225,38 +254,3 @@ def guess_language(query: str) -> str:
     if detection["is_english"]:
         return "en"
     return detection.get("language") or "other"
-
-
-# ---------------------------------------------------------------- saved versions
-
-VERSION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-
-
-def checkpoint_path(version: str):
-    if not VERSION_NAME_RE.match(version):
-        raise ValueError("version names may only contain letters, digits, '_', '-' and '.'")
-    return CHECKPOINTS_DIR / f"{version}.json"
-
-
-def save_checkpoint(version: str, payload: Dict[str, Any]) -> None:
-    with open(checkpoint_path(version), "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False)
-
-
-def load_version_config(version: Optional[str], task: Task) -> Dict[str, Any]:
-    """Return the prompt config saved under a version name for this task.
-
-    Raises ValueError for a version that is neither the baseline nor a saved checkpoint of the task.
-    """
-    if not version or version == BASELINE_VERSION:
-        return task.default_config
-    path = checkpoint_path(version)
-    if not path.exists():
-        raise ValueError(f"No saved model version named '{version}'")
-    with open(path, encoding="utf-8") as f:
-        checkpoint = json.load(f)
-    # Checkpoints saved before there were several examples have no task and belong to the default one.
-    saved_for = checkpoint.get("task") or DEFAULT_TASK_ID
-    if saved_for != task.id:
-        raise ValueError(f"Model version '{version}' was saved for the example '{saved_for}', not '{task.id}'")
-    return checkpoint["config"]
