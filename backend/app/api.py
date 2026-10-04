@@ -8,6 +8,7 @@ from typing import Optional
 import uuid
 
 from app import karpathy_loop, llm, serp
+from app.config import EVAL_LANGUAGE
 from app.database import get_db, PredictionRecord, FeedbackRecord, ModelVersion
 from app.tasks.intent.labels import SearchIntent
 from app.inference import classify_intent, classify_intent_v2
@@ -17,6 +18,7 @@ from app.laya_inference import (
     LAYA_MODELS,
     checkpoint_path,
     classify_with_laya,
+    guess_language,
     load_version_config,
     predict_batch,
     save_checkpoint,
@@ -197,6 +199,7 @@ def build_golden_data(db: Session) -> list:
                 "id": record.id,
                 "query": record.query,
                 "correct_intent": record.predicted_intent,
+                "language": record.language,
                 "source": "imported",
                 "feedback_entries": [],
             }
@@ -208,6 +211,8 @@ def build_golden_data(db: Session) -> list:
                 "id": str(uuid.uuid4()),
                 "query": feedback.query,
                 "correct_intent": None,
+                # Feedback-only queries have no reviewed language, so this is a guess.
+                "language": guess_language(feedback.query),
                 "source": "feedback",
                 "feedback_entries": [],
             }
@@ -230,6 +235,7 @@ def build_golden_data(db: Session) -> list:
             "id": data["id"],
             "query": data["query"],
             "correct_intent": data["correct_intent"] or "unknown",
+            "language": data["language"],
             "source": data["source"],
             "feedback_count": len(data["feedback_entries"]),
         })
@@ -258,11 +264,18 @@ async def get_golden_data_stats(db: Session = Depends(get_db)):
     from sqlalchemy import func
     unique_feedback_queries = db.query(func.count(func.distinct(FeedbackRecord.query))).scalar() or 0
 
+    # Only queries in the evaluation language are used by the evaluation and the Karpathy loop
+    golden = build_golden_data(db)
+    usable_count = sum(d["language"] == EVAL_LANGUAGE for d in golden)
+
     return {
         "imported_data": imported_count,
         "user_feedback_count": feedback_count,
         "unique_feedback_queries": unique_feedback_queries,
         "total_golden_data": imported_count + unique_feedback_queries,
+        "eval_language": EVAL_LANGUAGE,
+        "eval_language_data": usable_count,
+        "other_language_data": len(golden) - usable_count,
     }
 
 
@@ -275,13 +288,17 @@ def start_karpathy_loop(request: KarpathyLoopRequest, db: Session = Depends(get_
     if request.sample_size < 20 or request.sample_size > 10000:
         raise HTTPException(status_code=400, detail="Sample size must be between 20 and 10000")
 
+    golden = [d for d in build_golden_data(db) if d["correct_intent"] in SearchIntent.all_labels()]
     examples = [
         {"query": d["query"], "intent": d["correct_intent"]}
-        for d in build_golden_data(db)
-        if d["correct_intent"] in SearchIntent.all_labels()
+        for d in golden
+        if d["language"] == EVAL_LANGUAGE
     ]
     if len(examples) < 20:
-        raise HTTPException(status_code=400, detail="Need at least 20 labelled golden examples")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Need at least 20 labelled golden examples in language '{EVAL_LANGUAGE}'"
+        )
 
     try:
         start_config = load_version_config(request.start_version)
@@ -302,6 +319,8 @@ def start_karpathy_loop(request: KarpathyLoopRequest, db: Session = Depends(get_
             calibrate=request.calibrate,
             use_serp=request.use_serp,
             laya_model=request.laya_model,
+            language=EVAL_LANGUAGE,
+            excluded_other_language=len(golden) - len(examples),
         )
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -514,6 +533,7 @@ async def get_keywords(
             "keyword": record.query,
             "main_intent": record.predicted_intent,
             "secondary_intents": secondary_intents,
+            "language": record.language,
             "confidence": record.confidence,
             "model": record.model,
             "version": record.version,
@@ -548,9 +568,16 @@ async def get_keywords_stats(db: Session = Depends(get_db)):
         intent: count for intent, count in intent_counts
     }
 
+    # Count by language (None for queries whose language is not known)
+    language_counts = db.query(
+        PredictionRecord.language,
+        func.count(PredictionRecord.id).label('count')
+    ).group_by(PredictionRecord.language).all()
+
     return {
         "total_keywords": total_keywords,
         "intent_distribution": intent_distribution,
+        "language_distribution": {language or "unknown": count for language, count in language_counts},
     }
 
 
@@ -571,13 +598,18 @@ def run_evaluation(
     if sample_size < 10 or sample_size > 10000:
         raise HTTPException(status_code=400, detail="Sample size must be between 10 and 10000")
 
-    # Get keywords from database with sample size limit
-    records = db.query(PredictionRecord).filter(
+    # Get keywords from database with sample size limit (evaluation language only)
+    golden_query = db.query(PredictionRecord).filter(
         PredictionRecord.version == "v1_test_data"
-    ).limit(sample_size).all()
+    )
+    eval_query = golden_query.filter(PredictionRecord.language == EVAL_LANGUAGE)
+    records = eval_query.limit(sample_size).all()
 
     if not records:
-        raise HTTPException(status_code=400, detail="No test data found in database")
+        raise HTTPException(
+            status_code=400,
+            detail=f"No test data in language '{EVAL_LANGUAGE}' found in database"
+        )
 
     # Run prediction on every keyword based on model
     if model == "laya":
@@ -647,10 +679,8 @@ def run_evaluation(
 
     eval_id = str(uuid.uuid4())
 
-    # Get total golden data count
-    total_golden = db.query(PredictionRecord).filter(
-        PredictionRecord.version == "v1_test_data"
-    ).count()
+    # Get total golden data count (the pool the sample was drawn from)
+    total_golden = eval_query.count()
 
     return {
         "eval_id": eval_id,
@@ -666,4 +696,6 @@ def run_evaluation(
         "timestamp": datetime.utcnow().isoformat(),
         "sample_size": len(records),
         "total_golden_data": total_golden,
+        "eval_language": EVAL_LANGUAGE,
+        "excluded_other_language": golden_query.count() - total_golden,
     }

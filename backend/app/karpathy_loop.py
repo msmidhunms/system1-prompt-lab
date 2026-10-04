@@ -19,7 +19,8 @@ Three things keep the loop honest on a small, imbalanced dataset:
 - A candidate replaces the best only when a paired bootstrap over the dev queries
   says it is better with KEEP_CONFIDENCE probability.
 
-The LLM only ever sees dev examples. Held-out queries (EVAL_HOLDOUT_RATIO of all
+Only golden queries in the evaluation language (EVAL_LANGUAGE, English by default)
+take part. The LLM only ever sees dev examples. Held-out queries (EVAL_HOLDOUT_RATIO of all
 golden data plus whatever the dev sample did not use) are scored once at the end
 for the baseline and the best config. Every run writes its state, per-iteration
 checkpoints and prompts under autoresearch/runs/<run_id>/, and appends one line
@@ -511,6 +512,8 @@ def start_run(
     calibrate: bool,
     use_serp: bool,
     laya_model: str,
+    language: str,
+    excluded_other_language: int,
 ) -> Dict[str, Any]:
     """Create a run and start it on a background thread. Only one run at a time."""
     global _active_run_id
@@ -540,6 +543,8 @@ def start_run(
         "calibrate": calibrate,
         "use_serp": use_serp,
         "laya_model": laya_model,
+        "language": language,
+        "excluded_other_language": excluded_other_language,
         "keep_confidence": KEEP_CONFIDENCE,
         "dev_size": len(dev),
         "holdout_size": len(holdout),
@@ -590,6 +595,8 @@ def _run_loop(run: Dict[str, Any], dev: List[Dict[str, str]], holdout: List[Dict
         _persist(run)
 
     try:
+        _log(run, f"Golden queries in language '{run['language']}' only: "
+                  f"{run['excluded_other_language']} in other languages excluded")
         _log(run, f"Run started: {len(dev)} dev / {len(holdout)} holdout queries, {run['loops']} rounds, "
                   f"LLM {llm_config['provider']}:{llm_config['model'] or 'default'}, Laya {run['laya_model']}, "
                   f"objective {metric}, calibration {'on' if calibrate else 'off'}, SERP {'on' if use_serp else 'off'}")

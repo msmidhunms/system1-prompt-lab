@@ -224,6 +224,19 @@ def classify_with_laya(
     return SearchIntent(prediction["intent"]), prediction["confidence"]
 
 
+def guess_language(query: str) -> str:
+    """Best-effort language of a query that has no reviewed language.
+
+    Uses Laya's detector, which spots other scripts and accented text but cannot tell
+    unaccented Latin-script languages from English, so "en" here means "nothing says otherwise".
+    """
+    from laya import detect_language
+    detection = detect_language(query)
+    if detection["is_english"]:
+        return "en"
+    return detection.get("language") or "other"
+
+
 # ---------------------------------------------------------------- saved versions
 
 VERSION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")

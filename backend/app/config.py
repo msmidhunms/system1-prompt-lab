@@ -43,3 +43,4 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 # Eval
 EVAL_HOLDOUT_RATIO = float(os.getenv("EVAL_HOLDOUT_RATIO", "0.1"))  # 10% holdout
 EVAL_DEV_RATIO = float(os.getenv("EVAL_DEV_RATIO", "0.9"))  # 90% for loop to optimize
+EVAL_LANGUAGE = os.getenv("EVAL_LANGUAGE", "en")  # Only golden queries in this language are evaluated or trained on
