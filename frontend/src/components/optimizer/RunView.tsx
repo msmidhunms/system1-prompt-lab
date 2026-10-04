@@ -83,7 +83,7 @@ export default function RunView({ run, objective, keepConfidence, onStop, onChan
           )}
           {run.status === 'failed' && (
             <Banner tone="error">
-              This run stopped on an error: {run.error}
+              This run stopped on an error: <span className="clamp">{run.error}</span>
               {run.improved && ' The best prompt found before that is saved and scored below.'}
             </Banner>
           )}
@@ -170,7 +170,9 @@ export default function RunView({ run, objective, keepConfidence, onStop, onChan
                       </td>
                       <td className="num">{pct(round.accuracy)}</td>
                       <td className="num">{pct(round.macro_f1)}</td>
-                      <td className="secondary" style={{ maxWidth: 420 }}>{round.status === 'crash' ? round.error : round.hypothesis}</td>
+                      <td className="secondary" style={{ maxWidth: 420 }}>
+                        <div className={expanded === round.iteration ? '' : 'clamp'}>{round.status === 'crash' ? round.error : round.hypothesis}</div>
+                      </td>
                       <td className="actions">
                         {round.config && (
                           <Menu

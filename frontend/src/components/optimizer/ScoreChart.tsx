@@ -89,11 +89,13 @@ export default function ScoreChart({ run }: { run: Run }) {
           />
           <Line dataKey="best" type="stepAfter" stroke="var(--accent)" strokeWidth={2} dot={false} activeDot={false} isAnimationActive={false} />
           <Scatter
+            data={points.filter((p) => p.discarded != null)}
             dataKey="discarded"
             isAnimationActive={false}
             shape={(props: { cx?: number; cy?: number }) => <circle cx={props.cx} cy={props.cy} r={4} fill="var(--surface)" stroke="var(--text-muted)" strokeWidth={1.5} />}
           />
           <Scatter
+            data={points.filter((p) => p.kept != null)}
             dataKey="kept"
             isAnimationActive={false}
             shape={(props: { cx?: number; cy?: number }) => <circle cx={props.cx} cy={props.cy} r={5} fill="var(--accent)" stroke="var(--surface)" strokeWidth={2} />}
