@@ -21,7 +21,9 @@ interface LoopIteration {
   iteration: number
   model_version: string
   accuracy: number
+  accuracy_change?: number
   improvements: string[]
+  criteria_version?: string
   timestamp: string
 }
 
@@ -284,7 +286,17 @@ export default function KarpathyLoop() {
                     </p>
                     <p>
                       <strong>Accuracy:</strong> {(iter.accuracy * 100).toFixed(2)}%
+                      {iter.accuracy_change !== undefined && (
+                        <span className={`accuracy-change ${iter.accuracy_change > 0 ? 'positive' : iter.accuracy_change < 0 ? 'negative' : 'neutral'}`}>
+                          {iter.accuracy_change > 0 ? '+' : ''}{iter.accuracy_change.toFixed(2)}%
+                        </span>
+                      )}
                     </p>
+                    {iter.criteria_version && (
+                      <p className="criteria-version">
+                        <strong>Criteria:</strong> {iter.criteria_version}
+                      </p>
+                    )}
                     {iter.improvements.length > 0 && (
                       <div className="improvements">
                         <strong>Improvements:</strong>

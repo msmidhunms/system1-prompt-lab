@@ -292,6 +292,34 @@
   color: rgba(255, 255, 255, 0.9);
 }
 
+.accuracy-change {
+  margin-left: 0.75rem;
+  font-size: 0.85em;
+  font-weight: 600;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+}
+
+.accuracy-change.positive {
+  background: rgba(81, 207, 102, 0.2);
+  color: #51cf66;
+}
+
+.accuracy-change.negative {
+  background: rgba(255, 107, 107, 0.2);
+  color: #ff6b6b;
+}
+
+.accuracy-change.neutral {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.criteria-version {
+  font-size: 0.85em !important;
+  color: rgba(255, 255, 255, 0.6) !important;
+}
+
 .improvements {
   margin-top: 1rem;
   padding-top: 1rem;
