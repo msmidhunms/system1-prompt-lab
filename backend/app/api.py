@@ -461,15 +461,19 @@ async def get_keywords_stats(db: Session = Depends(get_db)):
 async def run_evaluation(
     model: str = "laya",
     version: str = "v1_baseline",
+    sample_size: int = 100,
     db: Session = Depends(get_db)
 ):
-    """Run evaluation on all keywords in the database."""
+    """Run evaluation on keywords in the database with configurable sample size."""
     from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix
 
-    # Get all keywords from database
+    if sample_size < 10 or sample_size > 10000:
+        raise HTTPException(status_code=400, detail="Sample size must be between 10 and 10000")
+
+    # Get keywords from database with sample size limit
     records = db.query(PredictionRecord).filter(
         PredictionRecord.version == "v1_test_data"
-    ).all()
+    ).limit(sample_size).all()
 
     if not records:
         raise HTTPException(status_code=400, detail="No test data found in database")
@@ -529,6 +533,11 @@ async def run_evaluation(
 
     eval_id = str(uuid.uuid4())
 
+    # Get total golden data count
+    total_golden = db.query(PredictionRecord).filter(
+        PredictionRecord.version == "v1_test_data"
+    ).count()
+
     return {
         "eval_id": eval_id,
         "model": model,
@@ -541,4 +550,6 @@ async def run_evaluation(
         "error_rate": round(len(errors) / len(records), 4),
         "top_errors": errors[:10],
         "timestamp": datetime.utcnow().isoformat(),
+        "sample_size": len(records),
+        "total_golden_data": total_golden,
     }

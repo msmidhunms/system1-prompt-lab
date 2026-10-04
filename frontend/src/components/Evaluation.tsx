@@ -35,6 +35,8 @@ interface EvaluationResult {
   error_rate: number
   top_errors: ErrorCase[]
   timestamp: string
+  sample_size?: number
+  total_golden_data?: number
 }
 
 const INTENT_COLORS: Record<string, string> = {
@@ -375,6 +377,9 @@ export default function Evaluation() {
               </p>
               <p>
                 <strong>Version:</strong> {result.version}
+              </p>
+              <p>
+                <strong>Sample Size:</strong> {result.sample_size} / {result.total_golden_data}
               </p>
               <p>
                 <strong>Evaluated:</strong> {new Date(result.timestamp).toLocaleString()}
