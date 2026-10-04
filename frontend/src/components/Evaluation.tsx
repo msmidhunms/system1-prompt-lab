@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import axios from 'axios'
+import { api, apiError, pct } from '../api'
+import { useTask } from '../TaskContext'
 import '../styles/Evaluation.css'
 
 interface PerClassMetrics {
@@ -9,14 +10,15 @@ interface PerClassMetrics {
   support: number
 }
 
+// confusion_matrix[actual][predicted]
 interface ConfusionMatrix {
-  [predicted: string]: {
-    [actual: string]: number
+  [actual: string]: {
+    [predicted: string]: number
   }
 }
 
 interface ErrorCase {
-  keyword: string
+  text: string
   predicted: string
   actual: string
   confidence: number
@@ -29,6 +31,7 @@ interface EvaluationResult {
   version: string
   total_cases: number
   accuracy: number
+  macro_f1: number
   per_class_metrics: Record<string, PerClassMetrics>
   confusion_matrix: ConfusionMatrix
   error_count: number
@@ -37,31 +40,44 @@ interface EvaluationResult {
   timestamp: string
   sample_size?: number
   total_golden_data?: number
-  eval_language?: string
+  eval_language?: string | null
   excluded_other_language?: number
 }
 
-const INTENT_COLORS: Record<string, string> = {
-  informational: '#64c8ff',
-  navigational: '#ffb164',
-  commercial: '#64ff96',
-  transactional: '#c864ff',
+interface EvaluationSummary {
+  eval_id: string
+  version: string
+  sample_size: number
+  accuracy: number
+  macro_f1: number
+  timestamp: string
 }
 
+const ERROR_PREVIEW_CHARS = 300
+
 export default function Evaluation() {
-  const [model, setModel] = useState('laya')
+  const { task, color } = useTask()
   const [version, setVersion] = useState('v1_baseline')
   const [versions, setVersions] = useState<string[]>(['v1_baseline'])
   const [sampleSize, setSampleSize] = useState(100)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<EvaluationResult | null>(null)
+  const [history, setHistory] = useState<EvaluationSummary[]>([])
+
+  const loadHistory = () =>
+    api
+      .get<EvaluationSummary[]>('/evaluations', { params: { task: task.id } })
+      .then((res) => setHistory(res.data))
+      .catch((err) => console.error('Failed to load past evaluations:', err))
 
   useEffect(() => {
-    axios
-      .get<{ version: string }[]>('http://localhost:8000/api/models')
+    api
+      .get<{ version: string }[]>('/models', { params: { task: task.id } })
       .then((res) => setVersions(res.data.map((m) => m.version)))
       .catch((err) => console.error('Failed to load model versions:', err))
+    loadHistory()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const handleAnalyze = async () => {
@@ -70,29 +86,32 @@ export default function Evaluation() {
     setResult(null)
 
     try {
-      const response = await axios.post('http://localhost:8000/api/evaluate', {
-        model,
+      const response = await api.post<EvaluationResult>('/evaluate', {
+        task: task.id,
+        model: 'laya',
         version,
-      }, {
-        params: {
-          sample_size: sampleSize,
-        }
+        sample_size: sampleSize,
       })
       setResult(response.data)
+      loadHistory()
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : 'Failed to run evaluation'
-      )
+      setError(apiError(err, 'Failed to run evaluation'))
     } finally {
       setLoading(false)
     }
   }
 
-  const getIntentColor = (intent: string): string => {
-    return INTENT_COLORS[intent.toLowerCase()] || '#999'
+  const openEvaluation = async (evalId: string) => {
+    setError(null)
+    try {
+      const response = await api.get<EvaluationResult>(`/evaluations/${evalId}`)
+      setResult(response.data)
+    } catch (err) {
+      setError(apiError(err, 'Failed to load the evaluation'))
+    }
   }
+
+  const getIntentColor = color
 
   const getAccuracyGrade = (accuracy: number): string => {
     if (accuracy >= 0.9) return 'A'
@@ -113,25 +132,13 @@ export default function Evaluation() {
   return (
     <div className="evaluation">
       <div className="section">
-        <h2>Model Evaluation & Benchmarking</h2>
+        <h2>Model Evaluation: {task.name}</h2>
         <p className="description">
-          Run evaluation on the baseline model against the golden dataset to measure accuracy and performance
+          Score a model version of this example on a random sample of its golden dataset. Every evaluation is saved
+          and listed under Past Evaluations.
         </p>
 
         <div className="eval-controls">
-          <div className="control-group">
-            <label htmlFor="model">Model:</label>
-            <select
-              id="model"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              disabled={loading}
-            >
-              <option value="laya">Laya (System 1)</option>
-              <option value="laya_v2">Laya V2</option>
-            </select>
-          </div>
-
           <div className="control-group">
             <label htmlFor="version">Version:</label>
             <select
@@ -176,7 +183,7 @@ export default function Evaluation() {
           <h3>Evaluation in Progress...</h3>
           <div className="progress-indicator">
             <div className="spinner"></div>
-            <p>Running predictions on all keywords in the database...</p>
+            <p>Running Laya on the sampled golden {task.items}...</p>
           </div>
         </div>
       )}
@@ -197,6 +204,10 @@ export default function Evaluation() {
             </div>
 
             <div className="metrics-grid">
+              <div className="metric-card">
+                <span className="metric-label">Macro-F1</span>
+                <span className="metric-value">{pct(result.macro_f1)}</span>
+              </div>
               <div className="metric-card">
                 <span className="metric-label">Total Cases</span>
                 <span className="metric-value">{result.total_cases}</span>
@@ -225,7 +236,7 @@ export default function Evaluation() {
             <table className="metrics-table">
               <thead>
                 <tr>
-                  <th>Intent</th>
+                  <th>Label</th>
                   <th>Precision</th>
                   <th>Recall</th>
                   <th>F1 Score</th>
@@ -291,42 +302,32 @@ export default function Evaluation() {
 
           <div className="section confusion-matrix-section">
             <h3>Confusion Matrix</h3>
-            <p className="description">Predicted intent vs Actual intent</p>
+            <p className="description">Rows are the golden label, columns are what the model predicted</p>
             <div className="confusion-matrix">
               <table>
                 <thead>
                   <tr>
-                    <th></th>
-                    {Object.keys(result.confusion_matrix)
-                      .sort()
-                      .map((intent) => (
-                        <th key={intent}>{intent.slice(0, 3).toUpperCase()}</th>
-                      ))}
+                    <th>golden ↓ / predicted →</th>
+                    {Object.keys(result.confusion_matrix).map((label) => (
+                      <th key={label}>{label}</th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {Object.keys(result.confusion_matrix)
-                    .sort()
-                    .map((predicted) => (
-                      <tr key={predicted}>
-                        <td className="row-header">{predicted.slice(0, 3).toUpperCase()}</td>
-                        {Object.keys(result.confusion_matrix[predicted])
-                          .sort()
-                          .map((actual) => {
-                            const count = result.confusion_matrix[predicted][actual]
-                            const isCorrect = predicted === actual
-                            return (
-                              <td
-                                key={`${predicted}-${actual}`}
-                                className={`matrix-cell ${isCorrect ? 'correct' : 'incorrect'}`}
-                                title={`Predicted: ${predicted}, Actual: ${actual}`}
-                              >
-                                {count}
-                              </td>
-                            )
-                          })}
-                      </tr>
-                    ))}
+                  {Object.entries(result.confusion_matrix).map(([actual, row]) => (
+                    <tr key={actual}>
+                      <td className="row-header">{actual}</td>
+                      {Object.entries(row).map(([predicted, count]) => (
+                        <td
+                          key={`${actual}-${predicted}`}
+                          className={`matrix-cell ${predicted === actual ? 'correct' : count > 0 ? 'incorrect' : ''}`}
+                          title={`Golden: ${actual}, predicted: ${predicted}`}
+                        >
+                          {count}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
@@ -334,7 +335,7 @@ export default function Evaluation() {
 
           <div className="section top-errors-section">
             <h3>Top Errors</h3>
-            <p className="description">Keywords with highest confidence predictions that were incorrect</p>
+            <p className="description">The wrong predictions the model was most confident about</p>
             {result.top_errors.length === 0 ? (
               <div className="no-errors">Perfect! No errors found.</div>
             ) : (
@@ -343,7 +344,9 @@ export default function Evaluation() {
                   <div key={idx} className="error-item">
                     <div className="error-header">
                       <span className="error-number">#{idx + 1}</span>
-                      <span className="error-keyword">{error.keyword}</span>
+                      <span className="error-keyword">
+                        {error.text.length > ERROR_PREVIEW_CHARS ? `${error.text.slice(0, ERROR_PREVIEW_CHARS)}…` : error.text}
+                      </span>
                       <span className="error-confidence">
                         {(error.confidence * 100).toFixed(0)}% confidence
                       </span>
@@ -394,17 +397,51 @@ export default function Evaluation() {
               </p>
               {result.eval_language && (
                 <p>
-                  <strong>Language:</strong> {result.eval_language} only ({result.excluded_other_language} golden
-                  queries in other languages excluded)
+                  <strong>Language:</strong> {result.eval_language} only ({result.excluded_other_language} golden{' '}
+                  {task.items} in other languages excluded)
                 </p>
               )}
               <p>
-                <strong>Evaluated:</strong> {new Date(result.timestamp).toLocaleString()}
+                <strong>Evaluated:</strong> {new Date(`${result.timestamp}Z`).toLocaleString()}
               </p>
             </div>
           </div>
         </>
       )}
+
+      <div className="section">
+        <h3>Past Evaluations</h3>
+        {history.length === 0 ? (
+          <p className="description">No evaluations have been run for this example yet.</p>
+        ) : (
+          <table className="metrics-table history-table">
+            <thead>
+              <tr>
+                <th>Evaluated</th>
+                <th>Version</th>
+                <th>Sample</th>
+                <th>Accuracy</th>
+                <th>Macro-F1</th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.map((item) => (
+                <tr
+                  key={item.eval_id}
+                  className={result?.eval_id === item.eval_id ? 'selected' : ''}
+                  onClick={() => openEvaluation(item.eval_id)}
+                >
+                  <td>{new Date(`${item.timestamp}Z`).toLocaleString()}</td>
+                  <td>{item.version}</td>
+                  <td>{item.sample_size}</td>
+                  <td>{pct(item.accuracy)}</td>
+                  <td>{pct(item.macro_f1)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   )
 }
