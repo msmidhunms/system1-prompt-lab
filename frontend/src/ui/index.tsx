@@ -123,19 +123,27 @@ export interface MenuItem {
 
 // The "⋯" menu on a table row.
 export function Menu({ items, label = 'Actions' }: { items: MenuItem[]; label?: string }) {
-  const [open, setOpen] = useState(false)
+  // Where the open menu sits on screen. It is placed against the viewport, so a scrolling table cannot clip it.
+  const [place, setPlace] = useState<{ top: number; right: number } | null>(null)
   const ref = useRef<HTMLDivElement>(null)
+  const open = place !== null
+  const setOpen = (next: boolean) => {
+    const rect = ref.current?.getBoundingClientRect()
+    setPlace(next && rect ? { top: rect.bottom + 4, right: window.innerWidth - rect.right } : null)
+  }
 
   useEffect(() => {
     if (!open) return
-    const close = (e: MouseEvent | KeyboardEvent) => {
-      if (e instanceof KeyboardEvent ? e.key === 'Escape' : !ref.current?.contains(e.target as Node)) setOpen(false)
+    const close = (e: Event) => {
+      if (e instanceof KeyboardEvent ? e.key === 'Escape' : e.type === 'scroll' || !ref.current?.contains(e.target as Node)) setPlace(null)
     }
     document.addEventListener('mousedown', close)
     document.addEventListener('keydown', close)
+    window.addEventListener('scroll', close, true)
     return () => {
       document.removeEventListener('mousedown', close)
       document.removeEventListener('keydown', close)
+      window.removeEventListener('scroll', close, true)
     }
   }, [open])
 
@@ -145,7 +153,7 @@ export function Menu({ items, label = 'Actions' }: { items: MenuItem[]; label?: 
         ⋯
       </button>
       {open && (
-        <div className="menu-list" role="menu">
+        <div className="menu-list" role="menu" style={{ top: place.top, right: place.right }}>
           {items.map((item) => (
             <button
               key={item.label}
