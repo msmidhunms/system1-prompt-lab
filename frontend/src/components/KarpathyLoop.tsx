@@ -1,14 +1,11 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
+import LLMSettings, { apiError } from './LLMSettings'
 import '../styles/KarpathyLoop.css'
 
-interface GoldenDataPoint {
-  id: string
-  query: string
-  correct_intent: string
-  source: string
-  feedback_count: number
-}
+const API = 'http://localhost:8000/api'
+const POLL_MS = 2000
+const LABELS = ['informational', 'navigational', 'commercial', 'transactional']
 
 interface GoldenDataStats {
   imported_data: number
@@ -17,157 +14,234 @@ interface GoldenDataStats {
   total_golden_data: number
 }
 
-interface LoopIteration {
-  iteration: number
-  model_version: string
-  accuracy: number
-  accuracy_change?: number
-  improvements: string[]
-  criteria_version?: string
-  timestamp: string
+interface PromptConfig {
+  state_template: string
+  instructions: string
+  criteria: Record<string, string>
 }
 
-interface ExperimentResult {
-  baseline_accuracy: number
-  final_accuracy: number
+interface Metrics {
+  accuracy: number
+  macro_f1: number
+  correct: number
+  total: number
+}
+
+interface LoopIteration {
+  iteration: number
+  timestamp: string
+  status: 'keep' | 'discard' | 'crash'
+  hypothesis: string | null
+  config: PromptConfig | null
+  accuracy: number | null
+  macro_f1: number | null
+  delta_vs_best: number | null
+  best_accuracy: number
+  warnings: string[]
+  error: string | null
+}
+
+interface Run {
+  run_id: string
+  status: 'running' | 'completed' | 'stopped' | 'failed' | 'interrupted'
+  phase: string
+  started_at: string
+  finished_at: string | null
+  llm: { provider: string; model: string }
+  loops: number
+  seed: number
+  start_version: string
+  dev_size: number
+  holdout_size: number
+  baseline_config: PromptConfig
+  baseline: Metrics | null
+  best_config: PromptConfig
+  best_accuracy: number | null
   best_iteration: number
-  best_model_name: string
-  iterations: LoopIteration[]
   improved: boolean
-  sample_size?: number
-  total_golden_data?: number
-  timestamp?: string
+  iterations: LoopIteration[]
+  holdout: { baseline: Metrics; best: Metrics } | null
+  error: string | null
+  log: string[]
+}
+
+interface RunSummary {
+  run_id: string
+  status: Run['status']
+  started_at: string
+  llm: { provider: string; model: string }
+  loops: number
+  completed_iterations: number
+  dev_size: number
+  baseline_accuracy: number | null
+  best_accuracy: number | null
+  best_iteration: number | null
+  improved: boolean
+}
+
+interface ModelVersion {
+  version: string
+  accuracy: number | null
+}
+
+const pct = (value: number | null | undefined) => (value == null ? '-' : `${(value * 100).toFixed(2)}%`)
+const signedPts = (value: number) => `${value > 0 ? '+' : ''}${(value * 100).toFixed(2)} pts`
+
+function ConfigView({ config, previous }: { config: PromptConfig; previous?: PromptConfig }) {
+  const changed = (a: string, b: string | undefined) => previous !== undefined && a !== b
+  return (
+    <dl className="config-view">
+      <dt className={changed(config.state_template, previous?.state_template) ? 'changed' : ''}>state template</dt>
+      <dd>{config.state_template}</dd>
+      <dt className={changed(config.instructions, previous?.instructions) ? 'changed' : ''}>instructions</dt>
+      <dd>{config.instructions}</dd>
+      {LABELS.map((label) => (
+        <div key={label} className="config-row">
+          <dt className={changed(config.criteria[label], previous?.criteria[label]) ? 'changed' : ''}>{label}</dt>
+          <dd>{config.criteria[label]}</dd>
+        </div>
+      ))}
+    </dl>
+  )
 }
 
 export default function KarpathyLoop() {
-  const [goldenData, setGoldenData] = useState<GoldenDataPoint[]>([])
   const [stats, setStats] = useState<GoldenDataStats>({
     imported_data: 0,
     user_feedback_count: 0,
     unique_feedback_queries: 0,
     total_golden_data: 0,
   })
-  const [loading, setLoading] = useState(false)
-  const [running, setRunning] = useState(false)
+  const [versions, setVersions] = useState<ModelVersion[]>([])
+  const [runs, setRuns] = useState<RunSummary[]>([])
+  const [run, setRun] = useState<Run | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [results, setResults] = useState<ExperimentResult | null>(null)
-  const [newModelName, setNewModelName] = useState('')
-  const [showNameModel, setShowNameModel] = useState(false)
-  const [sampleSize, setSampleSize] = useState(100)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [starting, setStarting] = useState(false)
+  const [sampleSize, setSampleSize] = useState(200)
   const [numLoops, setNumLoops] = useState(10)
+  const [startVersion, setStartVersion] = useState('v1_baseline')
+  const [activeLLM, setActiveLLM] = useState('')
+  const [expanded, setExpanded] = useState<number | null>(null)
+  const [newModelName, setNewModelName] = useState('')
+  const [showLog, setShowLog] = useState(false)
+  const pollRef = useRef<number | null>(null)
+
+  const running = run?.status === 'running'
 
   useEffect(() => {
-    loadGoldenData()
-    loadStats()
+    axios.get(`${API}/golden-data/stats`).then((res) => setStats(res.data)).catch((err) => console.error('Failed to load stats:', err))
+    loadVersions()
+    // Reattach to a loop that is already running on the server.
+    loadRuns().then((activeId) => {
+      if (activeId) loadRun(activeId)
+    })
+    return stopPolling
   }, [])
 
-  const loadStats = async () => {
-    try {
-      const response = await axios.get('http://localhost:8000/api/golden-data/stats')
-      setStats(response.data)
-    } catch (err) {
-      console.error('Failed to load stats:', err)
+  useEffect(() => {
+    if (!running || !run) return
+    pollRef.current = window.setInterval(() => loadRun(run.run_id), POLL_MS)
+    return stopPolling
+  }, [running, run?.run_id])
+
+  const stopPolling = () => {
+    if (pollRef.current !== null) {
+      window.clearInterval(pollRef.current)
+      pollRef.current = null
     }
   }
 
-  const loadGoldenData = async () => {
-    setLoading(true)
-    setError(null)
+  const loadVersions = () =>
+    axios.get<ModelVersion[]>(`${API}/models`).then((res) => setVersions(res.data)).catch((err) => console.error('Failed to load versions:', err))
+
+  const loadRuns = async (): Promise<string | null> => {
     try {
-      const response = await axios.get('http://localhost:8000/api/golden-data')
-      setGoldenData(response.data)
+      const res = await axios.get<{ active_run_id: string | null; runs: RunSummary[] }>(`${API}/karpathy-loop/runs`)
+      setRuns(res.data.runs)
+      return res.data.active_run_id
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : 'Failed to load golden dataset'
-      )
-    } finally {
-      setLoading(false)
+      console.error('Failed to load runs:', err)
+      return null
+    }
+  }
+
+  const loadRun = async (runId: string) => {
+    try {
+      const res = await axios.get<Run>(`${API}/karpathy-loop/runs/${runId}`)
+      setRun(res.data)
+      if (res.data.status !== 'running') loadRuns()
+    } catch (err) {
+      setError(apiError(err, 'Failed to load run'))
     }
   }
 
   const startKarpathyLoop = async () => {
-    if (stats.total_golden_data === 0) {
-      setError('No data in golden dataset. Please add some feedback first.')
-      return
-    }
-
-    if (sampleSize < 10 || sampleSize > 10000) {
-      setError('Sample size must be between 10 and 10000')
-      return
-    }
-
-    if (numLoops < 1 || numLoops > 100) {
-      setError('Number of loops must be between 1 and 100')
-      return
-    }
-
-    setRunning(true)
+    setStarting(true)
     setError(null)
-    setResults(null)
-
+    setNotice(null)
+    setExpanded(null)
     try {
-      const response = await axios.post('http://localhost:8000/api/karpathy-loop', {
-        golden_data_ids: goldenData.map((d) => d.id),
+      const res = await axios.post<Run>(`${API}/karpathy-loop`, {
         loops: numLoops,
-        baseline_model: 'laya',
-        baseline_version: 'v1_baseline',
-      }, {
-        params: {
-          sample_size: sampleSize,
-        }
+        sample_size: sampleSize,
+        start_version: startVersion,
       })
-
-      setResults(response.data)
-      if (response.data.improved) {
-        setShowNameModel(true)
-      }
+      setRun(res.data)
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : 'Failed to run Karpathy loop'
-      )
+      setError(apiError(err, 'Failed to start Karpathy loop'))
     } finally {
-      setRunning(false)
+      setStarting(false)
+    }
+  }
+
+  const stopRun = async () => {
+    if (!run) return
+    try {
+      await axios.post(`${API}/karpathy-loop/runs/${run.run_id}/stop`)
+      setNotice('Stopping after the current round...')
+    } catch (err) {
+      setError(apiError(err, 'Failed to stop run'))
     }
   }
 
   const saveImprovedModel = async () => {
-    if (!results || !newModelName.trim()) {
-      setError('Please enter a model name')
-      return
-    }
-
+    if (!run || !newModelName.trim()) return
+    setError(null)
     try {
-      // TODO: Replace with actual API endpoint
-      await axios.post('http://localhost:8000/api/save-model', {
+      await axios.post(`${API}/save-model`, {
         model_name: newModelName.trim(),
-        base_version: results.best_model_name,
-        accuracy: results.final_accuracy,
-        description: `Improved model from Karpathy loop - Best iteration: ${results.best_iteration}`,
+        run_id: run.run_id,
+        description: `Karpathy loop ${run.run_id}, best round ${run.best_iteration}`,
       })
-
-      setShowNameModel(false)
+      setNotice(`Saved as "${newModelName.trim()}". It is now selectable in Model Evaluation and as a starting point here.`)
       setNewModelName('')
-      // Optionally reload or show success message
+      loadVersions()
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : 'Failed to save model'
-      )
+      setError(apiError(err, 'Failed to save model'))
     }
   }
+
+  // The config each round was compared against: the best one at the time it ran.
+  const bestBefore = (index: number): PromptConfig | undefined => {
+    if (!run) return undefined
+    for (let i = index - 1; i >= 0; i--) {
+      const prev = run.iterations[i]
+      if (prev.status === 'keep' && prev.config) return prev.config
+    }
+    return run.baseline_config
+  }
+
+  const devGain = run?.baseline && run.best_accuracy != null ? run.best_accuracy - run.baseline.accuracy : null
 
   return (
     <div className="karpathy-loop">
       <div className="section">
-        <h2>Karpathy Loop - Model Improvement</h2>
+        <h2>Karpathy Loop - Prompt Autoresearch</h2>
         <p className="description">
-          Run iterative experiments to improve the model based on the golden dataset.
-          This process will run 10 loops, improving the model and recording metrics at each step.
+          An LLM rewrites the text Laya is given (state template, question instructions, label descriptions). Each
+          proposal is scored on a dev set of golden queries and kept only if accuracy improves. A holdout set the LLM
+          never sees is scored at the end.
         </p>
 
         <div className="golden-data-summary">
@@ -192,167 +266,251 @@ export default function KarpathyLoop() {
           </div>
         </div>
 
-        {stats.total_golden_data > 0 && (
-          <div className="loop-controls">
-            <div className="control-group">
-              <label htmlFor="sample-size">Sample Size:</label>
-              <input
-                id="sample-size"
-                type="number"
-                value={sampleSize}
-                onChange={(e) => setSampleSize(Math.max(10, Math.min(10000, parseInt(e.target.value) || 100)))}
-                disabled={running}
-                min="10"
-                max="10000"
-              />
-              <span className="control-hint">({Math.min(sampleSize, stats.total_golden_data)} of {stats.total_golden_data} available)</span>
-            </div>
+        <LLMSettings disabled={running} onActiveChange={setActiveLLM} />
 
-            <div className="control-group">
-              <label htmlFor="num-loops">Number of Loops:</label>
-              <input
-                id="num-loops"
-                type="number"
-                value={numLoops}
-                onChange={(e) => setNumLoops(Math.max(1, Math.min(100, parseInt(e.target.value) || 10)))}
-                disabled={running}
-                min="1"
-                max="100"
-              />
-            </div>
-
-            <button
-              onClick={startKarpathyLoop}
+        <div className="loop-controls">
+          <div className="control-group">
+            <label htmlFor="sample-size">Dev Set Size:</label>
+            <input
+              id="sample-size"
+              type="number"
+              value={sampleSize}
+              onChange={(e) => setSampleSize(Math.max(20, Math.min(10000, parseInt(e.target.value) || 200)))}
               disabled={running}
-              className="start-loop-btn"
-            >
-              {running ? 'Running Experiment...' : `Start Karpathy Loop (${numLoops} Iterations)`}
-            </button>
+              min="20"
+              max="10000"
+            />
           </div>
-        )}
+
+          <div className="control-group">
+            <label htmlFor="num-loops">Rounds:</label>
+            <input
+              id="num-loops"
+              type="number"
+              value={numLoops}
+              onChange={(e) => setNumLoops(Math.max(1, Math.min(100, parseInt(e.target.value) || 10)))}
+              disabled={running}
+              min="1"
+              max="100"
+            />
+          </div>
+
+          <div className="control-group">
+            <label htmlFor="start-version">Start From:</label>
+            <select id="start-version" value={startVersion} onChange={(e) => setStartVersion(e.target.value)} disabled={running}>
+              {versions.map((v) => (
+                <option key={v.version} value={v.version}>
+                  {v.version}
+                  {v.accuracy != null ? ` (${pct(v.accuracy)})` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {running ? (
+            <button onClick={stopRun} className="stop-loop-btn">
+              Stop After This Round
+            </button>
+          ) : (
+            <button onClick={startKarpathyLoop} disabled={starting || stats.total_golden_data === 0} className="start-loop-btn">
+              {starting ? 'Starting...' : `Start Karpathy Loop (${numLoops} Rounds)`}
+            </button>
+          )}
+        </div>
+        {activeLLM && <p className="control-hint">Proposals come from: {activeLLM}</p>}
 
         {error && <div className="error-message">{error}</div>}
+        {notice && <div className="success-message">{notice}</div>}
       </div>
 
-      {running && (
-        <div className="section running-section">
-          <h3>Experiment in Progress...</h3>
-          <div className="progress-indicator">
-            <div className="spinner"></div>
-            <p>Running 10 iterations to find the best model improvement...</p>
+      {run && (
+        <div className={`section results-section status-${run.status}`}>
+          <div className="run-header">
+            <h3>Run {run.run_id}</h3>
+            <span className={`status-badge ${run.status}`}>{run.status}</span>
           </div>
-        </div>
-      )}
+          <p className="run-meta">
+            {run.llm.provider}
+            {run.llm.model ? ` · ${run.llm.model}` : ''} · started from {run.start_version} · {run.dev_size} dev /{' '}
+            {run.holdout_size} holdout queries
+          </p>
 
-      {results && (
-        <div className="section results-section">
-          <h3>Experiment Results</h3>
+          {running && (
+            <div className="progress-line">
+              <div className="spinner small"></div>
+              <span>
+                {run.phase} ({run.iterations.length} of {run.loops} rounds done)
+              </span>
+            </div>
+          )}
+          {run.status === 'failed' && <div className="error-message">Run failed: {run.error}</div>}
+          {run.status === 'interrupted' && (
+            <div className="error-message">The server restarted while this run was in progress. Results up to that point are shown.</div>
+          )}
 
           <div className="results-summary">
             <div className="result-card">
-              <label>Baseline Accuracy</label>
-              <div className="metric-value">{(results.baseline_accuracy * 100).toFixed(2)}%</div>
+              <label>Baseline (dev)</label>
+              <div className="metric-value">{pct(run.baseline?.accuracy)}</div>
             </div>
             <div className="result-card">
-              <label>Final Accuracy</label>
-              <div className="metric-value">{(results.final_accuracy * 100).toFixed(2)}%</div>
+              <label>Best (dev)</label>
+              <div className="metric-value">{pct(run.best_accuracy)}</div>
             </div>
             <div className="result-card">
-              <label>Improvement</label>
-              <div className={`metric-value ${results.improved ? 'positive' : 'neutral'}`}>
-                {((results.final_accuracy - results.baseline_accuracy) * 100).toFixed(2)}%
+              <label>Dev Gain</label>
+              <div className={`metric-value ${devGain != null && devGain > 0 ? 'positive' : 'neutral'}`}>
+                {devGain == null ? '-' : signedPts(devGain)}
               </div>
             </div>
             <div className="result-card">
-              <label>Best Iteration</label>
-              <div className="metric-value">{results.best_iteration}/10</div>
+              <label>Best Round</label>
+              <div className="metric-value">{run.best_iteration === 0 ? 'baseline' : `${run.best_iteration}/${run.loops}`}</div>
+            </div>
+            <div className="result-card">
+              <label>Holdout: Baseline → Best</label>
+              <div className="metric-value small">
+                {run.holdout ? `${pct(run.holdout.baseline.accuracy)} → ${pct(run.holdout.best.accuracy)}` : 'scored at the end'}
+              </div>
             </div>
           </div>
 
           <div className="iterations-list">
-            <h4>Iteration Details</h4>
-            <div className="iterations-grid">
-              {results.iterations.map((iter) => (
-                <div key={iter.iteration} className="iteration-card">
-                  <div className="iteration-header">
-                    <span className="iteration-number">Loop {iter.iteration}</span>
-                    {iter.iteration === results.best_iteration && (
-                      <span className="best-badge">Best</span>
-                    )}
-                  </div>
-                  <div className="iteration-details">
-                    <p>
-                      <strong>Model:</strong> {iter.model_version}
-                    </p>
-                    <p>
-                      <strong>Accuracy:</strong> {(iter.accuracy * 100).toFixed(2)}%
-                      {iter.accuracy_change !== undefined && (
-                        <span className={`accuracy-change ${iter.accuracy_change > 0 ? 'positive' : iter.accuracy_change < 0 ? 'negative' : 'neutral'}`}>
-                          {iter.accuracy_change > 0 ? '+' : ''}{iter.accuracy_change.toFixed(2)}%
-                        </span>
+            <h4>Experiments</h4>
+            {run.iterations.length === 0 ? (
+              <p className="empty-message">No rounds finished yet.</p>
+            ) : (
+              <table className="iterations-table">
+                <thead>
+                  <tr>
+                    <th>Round</th>
+                    <th>Result</th>
+                    <th>Dev Accuracy</th>
+                    <th>vs Best</th>
+                    <th>Hypothesis</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {run.iterations.map((iter, index) => (
+                    <>
+                      <tr
+                        key={iter.iteration}
+                        className={`iteration-row ${iter.status}`}
+                        onClick={() => setExpanded(expanded === iter.iteration ? null : iter.iteration)}
+                      >
+                        <td>
+                          {iter.iteration}
+                          {iter.iteration === run.best_iteration && <span className="best-badge">Best</span>}
+                        </td>
+                        <td>
+                          <span className={`status-badge ${iter.status}`}>{iter.status}</span>
+                        </td>
+                        <td>{pct(iter.accuracy)}</td>
+                        <td>
+                          {iter.delta_vs_best != null && (
+                            <span
+                              className={`accuracy-change ${iter.delta_vs_best > 0 ? 'positive' : iter.delta_vs_best < 0 ? 'negative' : 'neutral'}`}
+                            >
+                              {signedPts(iter.delta_vs_best)}
+                            </span>
+                          )}
+                        </td>
+                        <td className="hypothesis">{iter.status === 'crash' ? iter.error : iter.hypothesis}</td>
+                      </tr>
+                      {expanded === iter.iteration && iter.config && (
+                        <tr key={`${iter.iteration}-detail`} className="iteration-detail">
+                          <td colSpan={5}>
+                            <p className="control-hint">Proposed prompt. Highlighted fields differ from the best prompt at the time.</p>
+                            <ConfigView config={iter.config} previous={bestBefore(index)} />
+                            {iter.warnings.map((w) => (
+                              <p key={w} className="warning-line">
+                                {w}
+                              </p>
+                            ))}
+                          </td>
+                        </tr>
                       )}
-                    </p>
-                    {iter.criteria_version && (
-                      <p className="criteria-version">
-                        <strong>Criteria:</strong> {iter.criteria_version}
-                      </p>
-                    )}
-                    {iter.improvements.length > 0 && (
-                      <div className="improvements">
-                        <strong>Improvements:</strong>
-                        <ul>
-                          {iter.improvements.map((imp, idx) => (
-                            <li key={idx}>{imp}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
+                    </>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
 
-          {results.improved && (
+          <div className="best-config">
+            <h4>{run.best_iteration === 0 ? 'Current Best Prompt (baseline)' : `Current Best Prompt (round ${run.best_iteration})`}</h4>
+            <ConfigView config={run.best_config} previous={run.best_iteration === 0 ? undefined : run.baseline_config} />
+          </div>
+
+          {!running && run.improved && (
             <div className="section model-saving-section">
-              <h3>Save Improved Model</h3>
-              <p>The experiment found an improved model! Name it for future reference.</p>
-
-              {!showNameModel ? (
-                <button onClick={() => setShowNameModel(true)} className="save-model-btn">
-                  Save as New Model
+              <h3>Save Improved Prompt</h3>
+              <p>Save the best prompt as a named model version so it can be evaluated or used as the next starting point.</p>
+              <div className="name-model-form">
+                <input
+                  type="text"
+                  placeholder="e.g., laya_v2_improved"
+                  value={newModelName}
+                  onChange={(e) => setNewModelName(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && saveImprovedModel()}
+                />
+                <button onClick={saveImprovedModel} disabled={!newModelName.trim()}>
+                  Save Model
                 </button>
-              ) : (
-                <div className="name-model-form">
-                  <input
-                    type="text"
-                    placeholder="e.g., laya_v2_improved"
-                    value={newModelName}
-                    onChange={(e) => setNewModelName(e.target.value)}
-                    onKeyPress={(e) => e.key === 'Enter' && saveImprovedModel()}
-                  />
-                  <button onClick={saveImprovedModel} disabled={!newModelName.trim()}>
-                    Save Model
-                  </button>
-                  <button
-                    onClick={() => {
-                      setShowNameModel(false)
-                      setNewModelName('')
-                    }}
-                    className="cancel-btn"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              )}
+              </div>
             </div>
           )}
 
-          {!results.improved && (
+          {!running && !run.improved && run.status !== 'failed' && (
             <div className="section no-improvement">
-              <p>No improvement found in this run. The baseline model is already optimal.</p>
+              <p>No proposal beat the starting prompt on the dev set in this run.</p>
             </div>
           )}
+
+          <button className="secondary-btn log-toggle" onClick={() => setShowLog(!showLog)}>
+            {showLog ? 'Hide Log' : 'Show Log'}
+          </button>
+          {showLog && <pre className="run-log">{run.log.join('\n')}</pre>}
+          <p className="control-hint">
+            Checkpoints, prompts and LLM replies for every round are in autoresearch/runs/{run.run_id}/
+          </p>
+        </div>
+      )}
+
+      {runs.length > 0 && (
+        <div className="section">
+          <h3>Past Runs</h3>
+          <table className="iterations-table">
+            <thead>
+              <tr>
+                <th>Run</th>
+                <th>Status</th>
+                <th>LLM</th>
+                <th>Rounds</th>
+                <th>Dev: Baseline → Best</th>
+              </tr>
+            </thead>
+            <tbody>
+              {runs.map((r) => (
+                <tr key={r.run_id} className={`iteration-row ${run?.run_id === r.run_id ? 'selected' : ''}`} onClick={() => loadRun(r.run_id)}>
+                  <td>{r.run_id}</td>
+                  <td>
+                    <span className={`status-badge ${r.status}`}>{r.status}</span>
+                  </td>
+                  <td>
+                    {r.llm.provider}
+                    {r.llm.model ? ` · ${r.llm.model}` : ''}
+                  </td>
+                  <td>
+                    {r.completed_iterations}/{r.loops}
+                  </td>
+                  <td>
+                    {pct(r.baseline_accuracy)} → {pct(r.best_accuracy)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 
@@ -362,36 +520,36 @@ export default function KarpathyLoop() {
           <div className="step">
             <div className="step-number">1</div>
             <div>
-              <strong>Initialize</strong>
-              <p>Start with baseline model and golden dataset</p>
+              <strong>Baseline</strong>
+              <p>Score the starting prompt with Laya on the dev set</p>
             </div>
           </div>
           <div className="step">
             <div className="step-number">2</div>
             <div>
-              <strong>Improve Input</strong>
-              <p>Analyze and improve the input features and representations</p>
+              <strong>Propose</strong>
+              <p>The LLM sees the metrics, the errors and past experiments, and rewrites the prompt</p>
             </div>
           </div>
           <div className="step">
             <div className="step-number">3</div>
             <div>
               <strong>Evaluate</strong>
-              <p>Evaluate against the golden dataset to measure accuracy</p>
+              <p>Laya is run again with the new prompt on the same dev set</p>
             </div>
           </div>
           <div className="step">
             <div className="step-number">4</div>
             <div>
-              <strong>Iterate</strong>
-              <p>Repeat for 10 loops, recording metrics and improvements</p>
+              <strong>Keep or Discard</strong>
+              <p>Higher accuracy becomes the new best. Anything else is discarded and logged</p>
             </div>
           </div>
           <div className="step">
             <div className="step-number">5</div>
             <div>
-              <strong>Save</strong>
-              <p>If improved, save the best model with a new name and score</p>
+              <strong>Holdout and Save</strong>
+              <p>The best prompt is checked on unseen queries, then saved as a model version</p>
             </div>
           </div>
         </div>
