@@ -29,8 +29,9 @@
   margin-bottom: 1rem;
 }
 
-.input-group input {
+.input-group textarea {
   flex: 1;
+  resize: vertical;
   padding: 0.75rem 1rem;
   border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 8px;
@@ -40,16 +41,30 @@
   transition: all 0.3s ease;
 }
 
-.input-group input:focus {
+.input-group textarea:focus {
   outline: none;
   border-color: #646cff;
   background: rgba(255, 255, 255, 0.1);
   box-shadow: 0 0 0 3px rgba(100, 108, 255, 0.1);
 }
 
-.input-group input:disabled {
+.input-group textarea:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.input-group select {
+  padding: 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: inherit;
+  font-size: 0.95em;
+  align-self: flex-start;
+}
+
+.input-group .analyse-btn {
+  align-self: flex-start;
 }
 
 .analyse-btn {
@@ -369,7 +384,8 @@
     border-color: rgba(0, 0, 0, 0.1);
   }
 
-  .input-group input {
+  .input-group textarea,
+  .input-group select {
     background: rgba(0, 0, 0, 0.05);
     border-color: rgba(0, 0, 0, 0.15);
     color: #213547;
