@@ -24,6 +24,22 @@ from app.tasks.registry import Task
 
 TOP_ERRORS = 10
 ACTIVE = ("queued", "running")
+COMPARISON_BUSY = (
+    "A model comparison is in progress. It times each model, so nothing else can run until it has finished."
+)
+_start_lock = threading.Lock()
+
+
+class Busy(RuntimeError):
+    """Other work is running that this evaluation cannot run alongside."""
+
+
+def comparison_running(db: Session) -> bool:
+    """Whether a model comparison is in progress, in any example."""
+    return (
+        db.query(EvaluationRun.id)
+        .filter(EvaluationRun.comparison_id.isnot(None), EvaluationRun.status.in_(ACTIVE)).first()
+    ) is not None
 
 
 def mark_interrupted() -> None:
@@ -79,14 +95,21 @@ def _sample(db: Session, task: Task, sample_size: int, seed: int) -> List[Dict[s
 def start(
     db: Session, task: Task, version: str, sample_size: int, seed: int, engine: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Start one evaluation and return its summary straight away. Raises ValueError if it cannot start."""
+    """Start one evaluation and return its summary straight away.
+
+    Raises ValueError if it cannot start, Busy if a comparison is in progress.
+    """
     return _start(db, task, version, sample_size, seed, [engine], comparison_id=None)[0]
 
 
 def start_comparison(
     db: Session, task: Task, version: str, sample_size: int, seed: int, engine_ids: List[str]
 ) -> List[Dict[str, Any]]:
-    """Start the same evaluation on several models, one after another. Returns their summaries."""
+    """Start the same evaluation on several models, one after another. Returns their summaries.
+
+    Raises ValueError if it cannot start, Busy if any evaluation is in progress: the comparison
+    reports a time per model, which other work on the same machine would skew.
+    """
     if len(set(engine_ids)) < 2:
         raise ValueError("Choose at least two models to compare")
     return _start(db, task, version, sample_size, seed, list(dict.fromkeys(engine_ids)), comparison_id=str(uuid.uuid4()))
@@ -104,29 +127,35 @@ def _start(db, task, version, sample_size, seed, engine_ids, comparison_id) -> L
     }
     jobs, started = [], []
     now = datetime.utcnow()
-    for engine_id in engine_ids:
-        config = on_engine(base_config, engine_id)
-        run = EvaluationRun(
-            id=str(uuid.uuid4()),
-            task_id=task.id,
-            model="laya",
-            engine=config.get("engine") or engines.LAYA,
-            version=version,
-            sample_size=len(sample),
-            total_cases=len(sample),
-            accuracy=0.0,
-            macro_f1=0.0,
-            result={},
-            status="queued",
-            progress_done=0,
-            progress_total=len(sample),
-            comparison_id=comparison_id,
-            created_at=now,
-        )
-        db.add(run)
-        jobs.append((run.id, config))
-        started.append(run)
-    db.commit()
+    # Checked and written under one lock, so two requests cannot both find the way clear.
+    with _start_lock:
+        if comparison_running(db):
+            raise Busy(COMPARISON_BUSY)
+        if comparison_id is not None and db.query(EvaluationRun.id).filter(EvaluationRun.status.in_(ACTIVE)).first():
+            raise Busy("An evaluation is in progress. A comparison times each model, so it has to run on its own.")
+        for engine_id in engine_ids:
+            config = on_engine(base_config, engine_id)
+            run = EvaluationRun(
+                id=str(uuid.uuid4()),
+                task_id=task.id,
+                model="laya",
+                engine=config.get("engine") or engines.LAYA,
+                version=version,
+                sample_size=len(sample),
+                total_cases=len(sample),
+                accuracy=0.0,
+                macro_f1=0.0,
+                result={},
+                status="queued",
+                progress_done=0,
+                progress_total=len(sample),
+                comparison_id=comparison_id,
+                created_at=now,
+            )
+            db.add(run)
+            jobs.append((run.id, config))
+            started.append(run)
+        db.commit()
     summaries = [summary(run) for run in started]
     threading.Thread(target=_run_all, args=(jobs, task, sample, context), name=f"evaluation-{jobs[0][0]}", daemon=True).start()
     return summaries
@@ -148,13 +177,15 @@ def _run(eval_id: str, task: Task, config: Dict[str, Any], sample: List[Dict[str
         set_fields(status="running")
         # Load the model before the clock starts, so the time is the scoring and not the download.
         predict_proba([sample[0]["text"]], config, task)
+        overhead = engines.overhead_seconds()
         started = time.perf_counter()
         # The version's own label bias (if it has one) is applied as saved; nothing is fitted here.
         _, metrics = scoring.evaluate(
             config, sample, task, "balanced", fit_bias=False,
             on_progress=lambda done, total: set_fields(progress_done=done),
         )
-        seconds = time.perf_counter() - started
+        # Waiting for another request to finish with the model, and loading it back, is not scoring.
+        seconds = time.perf_counter() - started - (engines.overhead_seconds() - overhead)
         errors = sorted((c for c in metrics["cases"] if not c["correct"]), key=lambda c: c["confidence"], reverse=True)
         run = db.query(EvaluationRun).filter(EvaluationRun.id == eval_id).first()
         if run is None:  # deleted while it ran
