@@ -42,6 +42,7 @@ def import_test_data():
                 search_intent_info = data.get('search_intent_info', {})
                 main_intent = search_intent_info.get('main_intent')
                 foreign_intents = search_intent_info.get('foreign_intent', [])
+                language = (data.get('extra') or {}).get('detected_language')
 
                 if not keyword or not main_intent:
                     skipped_count += 1
@@ -62,6 +63,7 @@ def import_test_data():
                     query=keyword,
                     predicted_intent=main_intent,
                     secondary_intents=foreign_intents if foreign_intents else None,
+                    language=language,
                     confidence=0.95,  # Default high confidence for golden dataset
                     model="serp_classifier",
                     version="v1_test_data"
