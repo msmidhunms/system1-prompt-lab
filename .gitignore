@@ -71,3 +71,4 @@ htmlcov/
 # Autoresearch
 autoresearch/results.tsv
 autoresearch/__pycache__/
+data/test_db.json
