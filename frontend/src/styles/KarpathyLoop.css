@@ -85,17 +85,63 @@
   color: #51cf66;
 }
 
+.loop-controls {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin-top: 1.5rem;
+}
+
+.loop-controls .control-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.loop-controls label {
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 0.9em;
+  font-weight: 600;
+}
+
+.loop-controls input[type="number"] {
+  padding: 0.6rem 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.3);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 0.95em;
+  width: 100px;
+}
+
+.loop-controls input[type="number"]:focus {
+  outline: none;
+  border-color: #646cff;
+}
+
+.loop-controls input[type="number"]:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.control-hint {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.85em;
+  margin-top: -0.25rem;
+}
+
 .start-loop-btn {
-  padding: 1rem 2rem;
+  padding: 0.6rem 2rem;
   background: linear-gradient(135deg, #646cff 0%, #535bf2 100%);
   border: none;
   border-radius: 8px;
   color: white;
   font-weight: 600;
-  font-size: 1.05em;
+  font-size: 1em;
   cursor: pointer;
   transition: all 0.3s ease;
-  width: 100%;
+  height: fit-content;
 }
 
 .start-loop-btn:hover:not(:disabled) {
