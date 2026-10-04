@@ -112,17 +112,21 @@ For each (model, version, test_set) triple, compute:
 Store in SQLite with git commit SHA for reproducibility.
 
 ### Karpathy Autoresearch Loop
-Modelled on [karpathy/autoresearch](https://github.com/karpathy/autoresearch), but the thing being edited is the **prompt Laya is given**, not code. A prompt config has three editable parts (`backend/app/laya_inference.py`):
+Modelled on [karpathy/autoresearch](https://github.com/karpathy/autoresearch), but the thing being edited is the **prompt Laya is given**, not code. A prompt config (`backend/app/laya_inference.py`) has these parts the LLM may rewrite:
 
-- `state_template`: how the query is rendered into the state passed to `Router.predict`.
+- `state_template`: how the query is rendered into the state passed to `Router.predict`. A string, or an object of field → string that becomes a JSON state (the form Laya's presets use, with the instructions naming the field in backticks). With SERP context enabled it may also use `{serp_sites}`, `{serp_titles}` and `{serp_snippets}`, drawn from the top `serp_results` results in `data/test_db.json`.
 - `instructions`: the question text.
 - `criteria`: one description per intent label (the labels themselves are fixed).
 
+Two more parts are set by the run, not the LLM: `model` (the Laya checkpoint: `typed-decisions`, `english`, `multilingual` or `auto`) and `label_bias` (per-label offsets fitted on the dev set).
+
 Each round (`backend/app/karpathy_loop.py`):
-1. An LLM is shown the current best config, its dev metrics, the confusion matrix, a sample of misclassified queries and the experiment history, and proposes a new config.
+1. An LLM is shown the current best config, its dev metrics, predicted-label counts, the confusion matrix, gold examples per label, a sample of misclassified queries and the experiment history, and proposes a new config.
 2. Laya is run with that config on the dev set.
-3. Dev accuracy higher than the best so far → **keep**. Otherwise → **discard**. An unusable LLM reply is a **crash**.
-4. The holdout set (`EVAL_HOLDOUT_RATIO` of the golden data, never shown to the LLM) is scored once at the end for the baseline and the best config.
+3. The config is scored by the run's objective. The default is the mean of accuracy and macro-F1, because on this imbalanced dataset plain accuracy rewards putting every query in the majority label.
+4. With calibration on, a per-label bias is fitted on the dev set for every config, so a prompt that skews towards one label is judged by how well it separates the labels rather than by which label it favours. The bias is scored cross-fitted (fitted on one half, scored on the other) and is only used when it beats the plain argmax by more than noise.
+5. **Keep** only if the score is higher and a paired bootstrap over the dev queries gives at least 0.8 probability that the gain is real. Otherwise **discard**. An unusable LLM reply is a **crash**.
+6. Held-out queries (`EVAL_HOLDOUT_RATIO` of the golden data plus whatever the dev sample did not use, never shown to the LLM) are scored once at the end for the baseline and the best config.
 
 Laya keeps only the first 48 tokens of each label description, so the LLM is told to keep them short.
 
@@ -133,7 +137,7 @@ Every run writes to `autoresearch/runs/<run_id>/` (gitignored):
 - `iter_NNN_prompt.txt`: the exact prompt sent to the LLM.
 - `best_config.json`, `holdout_results.json`, `dev_set.json`, `holdout_set.json`.
 
-One line per experiment is also appended to `autoresearch/results.tsv`. Saving a run's best prompt from the UI writes `autoresearch/checkpoints/<name>.json`; that name can then be used as `version` in `/api/predict` and `/api/evaluate`, or as the starting point of the next run.
+One line per experiment is also appended to `autoresearch/results.tsv`. Saving a run's best prompt from the UI writes `autoresearch/checkpoints/<name>.json`; that name can then be used as `version` in `/api/predict` and `/api/evaluate`, or as the starting point of the next run. A saved prompt that uses SERP placeholders only has that context for queries in `data/test_db.json`.
 
 ### LLM Configuration
 The LLM is chosen on the Karpathy Loop page and stored in the local SQLite DB (`backend/app/llm.py`). Supported: Claude (Anthropic API), OpenAI, Ollama, Google Gemini, any OpenAI-compatible endpoint (OpenRouter, Groq, LM Studio, vLLM, ...), and the Claude Code and Codex CLIs (which use their own login, no API key). API keys can be entered in the UI or supplied through `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` in the backend environment.
@@ -230,14 +234,14 @@ Frontend → **Compare** page → Select version "v1_baseline" → See accuracy,
 
 1. Open frontend → **Karpathy Loop** page.
 2. Pick the LLM provider and model, then **Save and test**.
-3. Set the dev set size, the number of rounds and the version to start from, then start the loop.
+3. Set the dev set size, the number of rounds, the version to start from, the Laya checkpoint and the objective, then start the loop.
 4. Watch each round arrive as keep / discard / crash. Click a round to see the prompt it proposed.
 5. When the run ends, compare dev and holdout accuracy and save the best prompt as a named version.
 
 **API alternative**:
 ```bash
 curl -X POST localhost:8000/api/karpathy-loop -H 'Content-Type: application/json' \
-  -d '{"loops": 10, "sample_size": 200, "start_version": "v1_baseline"}'
+  -d '{"loops": 10, "sample_size": 400, "start_version": "v1_baseline", "laya_model": "typed-decisions", "metric": "balanced", "calibrate": true, "use_serp": false}'
 curl localhost:8000/api/karpathy-loop/runs/<run_id>
 ```
 
