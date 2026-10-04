@@ -51,10 +51,12 @@ HISTORY_SHOWN = 15
 EXAMPLE_CHARS = 240
 
 
-def build_system_prompt(metric: str, calibrate: bool, use_serp: bool) -> str:
+def build_system_prompt(task: Task, metric: str, calibrate: bool, use_serp: bool) -> str:
+    labels = task.labels
+    field, placeholder = task.input_field, task.placeholder
     state_lines = [
-        '- "state_template": how each search query is presented to the model. Either a plain string, or a JSON object '
-        "of field name -> string, which is passed to the model as a JSON state. It must contain {query} exactly once.",
+        f'- "state_template": how each {task.item} is presented to the model. Either a plain string, or a JSON object '
+        f"of field name -> string, which is passed to the model as a JSON state. It must contain {placeholder} exactly once.",
     ]
     if use_serp:
         state_lines.append(
@@ -62,6 +64,16 @@ def build_system_prompt(metric: str, calibrate: bool, use_serp: bool) -> str:
             f'{{serp_snippets}} (their snippets), and set "serp_results" (1 to {serp.MAX_RESULTS}) for how many top '
             "results they draw on. The gold labels were produced from search results, so this context can carry signal, "
             "but long context can also drown out the query. Whether it helps is an empirical question for the loop."
+        )
+    question_lines = [
+        '- "instructions": the question the model answers.',
+        '- "criteria": one description per label. The label names and their number are fixed.',
+    ]
+    if task.question_type == "noul":
+        no, yes = labels
+        question_lines.append(
+            f'  This is a yes/no question for Laya: the instructions must be a question whose answer is yes for "{yes}" '
+            f'and no for "{no}", and the two descriptions say what the yes side and the no side look like.'
         )
     calibration = (
         "When a config skews towards one label, a per-label bias is fitted automatically on the dev set to correct "
@@ -76,31 +88,31 @@ def build_system_prompt(metric: str, calibrate: bool, use_serp: bool) -> str:
 
 The classifier is Laya, a fast non-autoregressive "System 1" model. It is not a chat LLM: in one forward pass it reads a state, a question's instructions and a short description of each option, and outputs a probability per option. It cannot reason step by step or follow long rule lists. It responds to the wording and the format of what it is given.
 
-The task is search-intent classification of search queries into exactly these labels: {", ".join(LABELS)}. The gold labels were reviewed by hand against the standard definitions, using these conventions: questions, facts, people, news, entertainment and game content are informational; a named business, organisation, website, login page or event is navigational; researching products, services or businesses (reviews, comparisons, product categories, photos of a venue) is commercial; buying, booking, tickets, downloads and specific products sold in shops are transactional. The gold examples you are shown follow them.
+The task is {task.loop_task} into exactly these labels: {", ".join(labels)}. {task.loop_conventions}
 
 You may change these things, and nothing else:
 {chr(10).join(state_lines)}
-- "instructions": the question the model answers.
-- "criteria": one description per label. The label names and their number are fixed.
+{chr(10).join(question_lines)}
 
-What is known about Laya from its own presets and from measurements on this dataset:
-- It was trained on states that are JSON objects with named fields, and instructions that name the field in backticks. Example from its presets: state {{"message": "..."}} with instructions "What does the customer want in `message`?". On this dataset a bare-string state made the model put about 95% of queries into a single label, while the same wording with a state of {{"query": "{{query}}"}} and `query` named in the instructions produced a real spread of predictions.
+What is known about Laya from its own presets and from measurements:
+- It was trained on states that are JSON objects with named fields, and instructions that name the field in backticks. Example from its presets: state {{"message": "..."}} with instructions "What does the customer want in `message`?". On a dataset of search queries a bare-string state made the model put about 95% of them into a single label, while the same wording with a JSON state and the field named in the instructions produced a real spread of predictions.
 - Its presets describe options in short plain language, for example "money returned or a duplicate charge reversed" or "a bug, outage or integration problem", not as keyword lists.
-- Each criteria description is cut off after about 48 tokens. Stay under {MAX_CRITERION_WORDS} words each and put the most discriminating words first.
-- Keep instructions under {MAX_INSTRUCTION_WORDS} words.
+- Each criteria description is cut off after about 48 tokens, and the instructions and all {len(labels)} descriptions together share a budget of about 190 tokens. Stay under {task.max_criterion_words} words each and put the most discriminating words first.
+- Keep instructions under {task.max_instruction_words} words.
+- Only about the first 300 tokens of a long {task.item} are read.
 
 How the loop scores a config: it is run on a dev set and scored by {METRICS[metric]}. {calibration}
 
-A config replaces the current best only if it scores higher AND a paired bootstrap over the dev queries says the gain is real with probability {KEEP_CONFIDENCE}. A one-or-two-query gain is noise and is discarded. A separate held-out set you never see is scored at the end, so describing kinds of queries generalises and pasting specific dev queries does not.
+A config replaces the current best only if it scores higher AND a paired bootstrap over the dev {task.items} says the gain is real with probability {KEEP_CONFIDENCE}. A one-or-two-{task.item} gain is noise and is discarded. A separate held-out set you never see is scored at the end, so describing kinds of {task.items} generalises and pasting specific dev {task.items} does not.
 
 Make one clear, testable change per round and say what you expect it to fix. Use the experiment history: it shows, for every past round, how the predicted-label counts and per-label recall moved. Do not repeat a discarded idea, and try a different direction when several rounds in a row were discarded.
 
 Reply with a single JSON object and nothing else:
 {{
   "hypothesis": "one or two sentences: what you are changing and why it should help",
-  "state_template": {{"query": "{{query}}"}},{serp_field}
+  "state_template": {{"{field}": "{placeholder}"}},{serp_field}
   "instructions": "...",
-  "criteria": {{{", ".join(f'"{label}": "..."' for label in LABELS)}}}
+  "criteria": {{{", ".join(f'"{label}": "..."' for label in labels)}}}
 }}"""
 
 
@@ -114,7 +126,7 @@ def split_examples(
     The holdout share of all data is reserved first, dev is sampled from the rest, and
     whatever dev did not use joins the holdout (capped), since it costs nothing to keep unseen.
     """
-    shuffled = sorted(examples, key=lambda e: e["query"])
+    shuffled = sorted(examples, key=lambda e: e["text"])
     random.Random(seed).shuffle(shuffled)
     reserved_size = max(1, round(len(shuffled) * EVAL_HOLDOUT_RATIO))
     reserved, rest = shuffled[:reserved_size], shuffled[reserved_size:]
@@ -147,11 +159,18 @@ def _sample_errors(cases: List[Dict[str, Any]], rng: random.Random, limit: int) 
     return picked
 
 
-def _counts_line(counts: Dict[str, int]) -> str:
-    return ", ".join(f"{label} {counts[label]}" for label in LABELS)
+def _counts_line(counts: Dict[str, int], labels: List[str]) -> str:
+    return ", ".join(f"{label} {counts[label]}" for label in labels)
+
+
+def _shown(text: str) -> str:
+    """An input as the LLM sees it: on one line, and cut when long."""
+    text = " ".join(text.split())
+    return text if len(text) <= EXAMPLE_CHARS else text[:EXAMPLE_CHARS].rstrip() + "…"
 
 
 def build_user_prompt(
+    task: Task,
     best_config: Dict[str, Any],
     best_metrics: Dict[str, Any],
     history: List[Dict[str, Any]],
@@ -161,6 +180,7 @@ def build_user_prompt(
     metric: str,
     use_serp: bool,
 ) -> str:
+    labels = task.labels
     rng = random.Random(seed * 1000 + iteration)
     cases = best_metrics["cases"]
 
@@ -176,38 +196,38 @@ def build_user_prompt(
         "## Current best config",
         json.dumps(_proposal_view(best_config), indent=2, ensure_ascii=False),
         "",
-        f"## Its dev-set results ({best_metrics['total']} queries)",
+        f"## Its dev-set results ({best_metrics['total']} {task.items})",
         f"score: {best_metrics['score']:.4f}   accuracy: {best_metrics['accuracy']:.4f}   macro-F1: {best_metrics['macro_f1']:.4f}",
-        f"gold label counts:      {_counts_line(best_metrics['gold_counts'])}",
-        f"predicted label counts: {_counts_line(best_metrics['predicted_counts'])}",
+        f"gold label counts:      {_counts_line(best_metrics['gold_counts'], labels)}",
+        f"predicted label counts: {_counts_line(best_metrics['predicted_counts'], labels)}",
         "",
         "Per class (precision / recall / f1 / support):",
     ]
-    for label in LABELS:
+    for label in labels:
         m = best_metrics["per_class"][label]
         lines.append(f"- {label}: {m['precision']:.2f} / {m['recall']:.2f} / {m['f1']:.2f} / {m['support']}")
 
     lines += ["", "Confusion matrix (rows = gold label, columns = predicted):",
-              "gold \\ predicted | " + " | ".join(LABELS)]
-    for actual in LABELS:
+              "gold \\ predicted | " + " | ".join(labels)]
+    for actual in labels:
         row = best_metrics["confusion"][actual]
-        lines.append(f"{actual} | " + " | ".join(str(row[p]) for p in LABELS))
+        lines.append(f"{actual} | " + " | ".join(str(row[p]) for p in labels))
 
-    lines += ["", "## What the gold labels look like (random dev queries per label)"]
-    for label in LABELS:
+    lines += ["", f"## What the gold labels look like (random dev {task.items} per label)"]
+    for label in labels:
         gold = [c for c in cases if c["actual"] == label]
         rng.shuffle(gold)
         lines.append(f"{label}:")
         for case in gold[:GOLD_SHOWN_PER_LABEL]:
-            lines.append(f'- "{case["query"]}"{with_sites(case["query"])}')
+            lines.append(f'- "{_shown(case["text"])}"{with_sites(case["text"])}')
 
     errors = _sample_errors(cases, rng, ERRORS_SHOWN)
     total_errors = best_metrics["total"] - best_metrics["correct"]
-    lines += ["", f"## Misclassified dev queries ({len(errors)} of {total_errors} shown)"]
+    lines += ["", f"## Misclassified dev {task.items} ({len(errors)} of {total_errors} shown)"]
     for case in errors:
         lines.append(
-            f'- "{case["query"]}"  gold={case["actual"]}  predicted={case["predicted"]} '
-            f'({case["confidence"]:.2f}){with_sites(case["query"])}'
+            f'- "{_shown(case["text"])}"  gold={case["actual"]}  predicted={case["predicted"]} '
+            f'({case["confidence"]:.2f}){with_sites(case["text"])}'
         )
 
     lines += ["", "## Experiment history (oldest first)"]
@@ -217,13 +237,13 @@ def build_user_prompt(
         if item["status"] == "crash":
             lines.append(f"- round {item['iteration']}: CRASH ({item['error']})")
             continue
-        recall = ", ".join(f"{label} {item['per_class'][label]['recall']:.2f}" for label in LABELS)
+        recall = ", ".join(f"{label} {item['per_class'][label]['recall']:.2f}" for label in labels)
         lines += [
             f"- round {item['iteration']}: {item['status'].upper()}  score {item['score']:.4f} "
             f"({item['delta_vs_best']:+.4f} vs best at the time, P(better)={item['p_better']:.2f})  "
             f"accuracy {item['accuracy']:.4f}  macro-F1 {item['macro_f1']:.4f}",
             f"  hypothesis: {item['hypothesis']}",
-            f"  predicted counts: {_counts_line(item['predicted_counts'])}   recall: {recall}",
+            f"  predicted counts: {_counts_line(item['predicted_counts'], labels)}   recall: {recall}",
         ]
         if item["status"] == "discard":
             lines.append(f"  discarded config: {json.dumps(_proposal_view(item['config']), ensure_ascii=False)}")
@@ -232,12 +252,12 @@ def build_user_prompt(
     return "\n".join(lines)
 
 
-def parse_proposal(raw_reply: str, use_serp: bool, laya_model: str) -> Tuple[Dict[str, Any], str, List[str]]:
+def parse_proposal(raw_reply: str, task: Task, use_serp: bool, laya_model: str) -> Tuple[Dict[str, Any], str, List[str]]:
     """Turn the LLM's reply into (config, hypothesis, warnings)."""
     proposal = llm.extract_json(raw_reply)
     # The checkpoint is a run setting and the bias is fitted, so neither is taken from the LLM.
     proposal = {**proposal, "model": laya_model}
-    config, warnings = validate_config(proposal, allow_serp=use_serp)
+    config, warnings = validate_config(proposal, task, allow_serp=use_serp)
     hypothesis = str(proposal.get("hypothesis", "")).strip() or "(no hypothesis given)"
     return config, hypothesis, warnings
 
