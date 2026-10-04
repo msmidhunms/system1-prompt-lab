@@ -149,6 +149,37 @@ def test_comparison_runs_the_same_sample_on_each_model(router, monkeypatch):
     assert engine_id == "gliclass" and set(texts) == {"sports one", "business two", "world three"}
     assert descriptions[1].startswith("sport")
     assert len(client.get("/api/engines").json()) == 7
+    # The baseline is a Laya prompt: its latest evaluation is the Laya run, not another model's from the comparison.
+    baseline = client.get("/api/models", params={"task": "news_topic"}).json()[0]
+    assert baseline["latest_evaluation"]["eval_id"] == by_engine["laya"]["eval_id"]
+
+
+def test_a_comparison_runs_on_its_own(router, db):
+    from app import evaluations
+    from app.database import EvaluationRun
+
+    for text, label in [("sports one", "sports"), ("business two", "business")]:
+        client.post("/api/golden-data", json={"task": "news_topic", "text": text, "label": label})
+    compare = {"task": "news_topic", "engines": ["laya", "gliclass"]}
+
+    def in_progress(eval_id, comparison_id):
+        db.add(EvaluationRun(id=eval_id, task_id="toxicity", model="laya", version="v1_baseline", sample_size=5,
+                             total_cases=5, accuracy=0.0, macro_f1=0.0, result={}, status="running",
+                             comparison_id=comparison_id))
+        db.commit()
+
+    # An evaluation in progress (in any example) holds a comparison back, but not another evaluation.
+    in_progress("plain", None)
+    assert client.post("/api/compare", json=compare).status_code == 409
+    assert client.post("/api/evaluate", json={"task": "news_topic"}).status_code == 200
+    wait_for_background_work()
+    db.query(EvaluationRun).filter(EvaluationRun.id == "plain").delete()
+
+    # A comparison in progress holds back everything that would run alongside it.
+    in_progress("part-of-a-comparison", "c1")
+    assert client.post("/api/compare", json=compare).status_code == 409
+    assert client.post("/api/evaluate", json={"task": "news_topic"}).status_code == 409
+    assert evaluations.comparison_running(db)  # what the optimizer checks before it starts a run
 
 
 def test_a_version_keeps_its_model_and_can_be_run_on_another(router):

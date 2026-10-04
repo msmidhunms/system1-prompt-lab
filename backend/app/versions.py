@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
+from app import engines
 from app.config import CHECKPOINTS_DIR, DEFAULT_TASK_ID
 from app.database import EvaluationRun, ModelVersion, PredictionRecord
 from app.laya_inference import validate_config
@@ -256,10 +257,18 @@ def delete(db: Session, name: str) -> None:
     db.commit()
 
 
-def _latest_evaluation(db: Session, task_id: str, version: str) -> Optional[EvaluationRun]:
+def _latest_evaluation(db: Session, task_id: str, version: str, config: Optional[Dict[str, Any]]) -> Optional[EvaluationRun]:
+    """The version's latest completed evaluation on the model it was saved for.
+
+    A comparison (or an evaluation on another model) runs the same prompt elsewhere; that is not the version's score.
+    """
+    own_engine = (config or {}).get("engine") or engines.LAYA
     return (
         db.query(EvaluationRun)
-        .filter(EvaluationRun.task_id == task_id, EvaluationRun.version == version, EvaluationRun.status == "completed")
+        .filter(
+            EvaluationRun.task_id == task_id, EvaluationRun.version == version,
+            EvaluationRun.status == "completed", EvaluationRun.engine == own_engine,
+        )
         .order_by(EvaluationRun.created_at.desc()).first()
     )
 
@@ -283,7 +292,7 @@ def _describe(db: Session, row: ModelVersion) -> Dict[str, Any]:
         "accuracy": checkpoint.get("dev_accuracy"),
         "macro_f1": checkpoint.get("dev_macro_f1"),
         "holdout_accuracy": checkpoint.get("holdout_accuracy"),
-        "latest_evaluation": _evaluation_summary(_latest_evaluation(db, row.task_id, row.version)),
+        "latest_evaluation": _evaluation_summary(_latest_evaluation(db, row.task_id, row.version, checkpoint.get("config"))),
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "config": checkpoint.get("config"),
     }
@@ -302,7 +311,7 @@ def list_versions(db: Session, task: Task) -> List[Dict[str, Any]]:
         "accuracy": None,
         "macro_f1": None,
         "holdout_accuracy": None,
-        "latest_evaluation": _evaluation_summary(_latest_evaluation(db, task.id, BASELINE_VERSION)),
+        "latest_evaluation": _evaluation_summary(_latest_evaluation(db, task.id, BASELINE_VERSION, task.default_config)),
         "created_at": None,
         "config": task.default_config,
     }]
