@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, apiError, pct, when } from '../api'
 import { useApp, useTask } from '../context'
-import { Banner, Button, Card, EmptyState, Field, LabelBadge, ProgressBar, StatTile, StatusBadge } from '../ui'
+import { Banner, Button, Card, EmptyState, Field, LabelBadge, NumberInput, ProgressBar, StatTile, StatusBadge } from '../ui'
 
 interface ClassMetrics {
   precision: number
@@ -151,15 +151,7 @@ export default function Evaluation() {
               </select>
             </Field>
             <Field label="Sample size">
-              <input
-                className="input narrow num"
-                type="number"
-                min={10}
-                max={10000}
-                value={sampleSize}
-                onChange={(e) => setSampleSize(Math.max(10, Math.min(10000, parseInt(e.target.value) || 200)))}
-                disabled={running}
-              />
+              <NumberInput value={sampleSize} min={10} max={10000} onChange={setSampleSize} disabled={running} />
             </Field>
             <Button variant="primary" onClick={start} disabled={running || task.golden_rows === 0}>
               {running ? 'Evaluating…' : 'Run evaluation'}

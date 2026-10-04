@@ -153,6 +153,8 @@ export interface Intent {
   version?: string
   // An evaluation to show (Evaluation tab).
   evalId?: string
+  // The model to optimize the prompt for (Prompt Optimizer tab).
+  engine?: string
   editFrom?: { name: string; config: PromptConfig; base: string | null }
 }
 

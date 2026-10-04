@@ -46,7 +46,7 @@ function useRunSettings(taskId: string): [RunSettings, (patch: Partial<RunSettin
 }
 
 export default function Optimizer() {
-  const { task, versions, refreshVersions } = useTask()
+  const { task, versions, refreshVersions, intent, clearIntent } = useTask()
   const { llm, activity, refreshActivity, openSettings, tasks, go, engines } = useApp()
   const [settings, update] = useRunSettings(task.id)
   const [startVersion, setStartVersion] = useState('v1_baseline')
@@ -82,6 +82,17 @@ export default function Optimizer() {
     loadRuns()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Another tab (Compare Models) can ask for a prompt and a model to be set up, ready to start.
+  useEffect(() => {
+    if (intent?.tab !== 'optimizer') return
+    if (!running) {
+      if (intent.version) setStartVersion(intent.version)
+      if (intent.engine) update({ engine: intent.engine })
+    }
+    clearIntent()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [intent, clearIntent])
 
   // Attach to this example's run in progress, wherever it was started from.
   useEffect(() => {

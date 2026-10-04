@@ -70,6 +70,34 @@ export function Field({ label, hint, over, children }: { label: string; hint?: R
   )
 }
 
+// A whole number between min and max. What is typed stays on screen as typed until the field is left:
+// clamping it on each keystroke would turn a "2" on the way to "250" into the minimum.
+export function NumberInput({ value, min, max, onChange, disabled }: {
+  value: number
+  min: number
+  max: number
+  onChange: (value: number) => void
+  disabled?: boolean
+}) {
+  const [draft, setDraft] = useState<string | null>(null)
+  return (
+    <input
+      className="input narrow num"
+      type="number"
+      min={min}
+      max={max}
+      disabled={disabled}
+      value={draft ?? value}
+      onChange={(e) => {
+        setDraft(e.target.value)
+        const typed = parseInt(e.target.value)
+        if (!Number.isNaN(typed)) onChange(Math.max(min, Math.min(max, typed)))
+      }}
+      onBlur={() => setDraft(null)}
+    />
+  )
+}
+
 export function Banner({ tone, children, action }: { tone?: 'error' | 'success' | 'warning'; children: ReactNode; action?: ReactNode }) {
   return (
     <div className={`banner ${tone ?? ''}`} role={tone === 'error' ? 'alert' : 'status'}>
