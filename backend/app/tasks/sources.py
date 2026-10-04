@@ -74,7 +74,7 @@ def _quotas(pools: Dict[str, List[Row]], size: int, seed: int) -> List[Row]:
 # Banking77's 77 intents, grouped by what the message is about.
 BANKING77_GROUPS = {
     "card": [
-        "activate_my_card", "apple_pay_or_google_pay", "card_about_to_expire", "card_acceptance", "card_arrival",
+        "activate_my_card", "card_about_to_expire", "card_acceptance", "card_arrival",
         "card_delivery_estimate", "card_linking", "card_not_working", "change_pin", "compromised_card",
         "contactless_not_working", "disposable_card_limits", "get_disposable_virtual_card", "get_physical_card",
         "getting_spare_card", "getting_virtual_card", "lost_or_stolen_card", "order_physical_card", "pin_blocked",
@@ -92,7 +92,7 @@ BANKING77_GROUPS = {
     ],
     # Every way of getting money into the account, including by bank transfer and which cards can be used for it.
     "top_up": [
-        "automatic_top_up", "balance_not_updated_after_bank_transfer",
+        "apple_pay_or_google_pay", "automatic_top_up", "balance_not_updated_after_bank_transfer",
         "balance_not_updated_after_cheque_or_cash_deposit", "pending_top_up", "supported_cards_and_currencies",
         "top_up_by_bank_transfer_charge", "top_up_by_card_charge", "top_up_by_cash_or_cheque", "top_up_failed",
         "top_up_limits", "top_up_reverted", "topping_up_by_card", "transfer_into_account", "verify_top_up",

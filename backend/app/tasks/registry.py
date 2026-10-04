@@ -130,7 +130,7 @@ _TASKS = [
                 "card": "the card itself: ordering, delivery, activation, PIN, lost or not working",
                 "card_payment": "a payment made with the card: declined, pending, charged twice, a fee or a refund",
                 "transfer": "sending money to someone or receiving money from someone",
-                "top_up": "adding money to the account by card, bank transfer, cash or cheque",
+                "top_up": "adding money to the account by card, bank transfer, Apple Pay, cash or cheque",
                 "cash_withdrawal": "taking cash out at an ATM",
                 "account": "identity checks, personal details, closing the account or exchanging currencies",
             },
@@ -141,7 +141,7 @@ _TASKS = [
             "six by what the message is about: the physical or virtual card itself (card); something that happened to "
             "a payment made with the card, including refunds and unexpected charges on the statement (card_payment); "
             "sending money to another person or receiving money from one (transfer); getting money into the account "
-            "by any means, including by bank transfer and which cards can be used for it (top_up); cash machines and "
+            "by any means, including by bank transfer or Apple Pay / Google Pay, and which cards can be used for it (top_up); cash machines and "
             "cash withdrawals (cash_withdrawal); identity verification, personal details, passcode, closing the account "
             "and currency exchange (account)."
         ),
