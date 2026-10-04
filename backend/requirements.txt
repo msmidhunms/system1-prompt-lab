@@ -12,4 +12,6 @@ pytest
 pytest-asyncio
 httpx
 laya
+huggingface_hub
+pyarrow
 anthropic
