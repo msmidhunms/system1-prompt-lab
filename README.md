@@ -81,16 +81,18 @@ Use `data/test_cases_sample.jsonl` as reference. **You should provide your own t
 
 ## Golden Dataset Labels
 
-The golden dataset is `data/test_db.json` (1,000 search queries with their top results), imported into the `predictions` table with `backend/scripts/import_test_data.py`. Each row carries a primary intent (`main_intent`) and optional secondary intents (`foreign_intent`).
+The golden dataset is `data/test_db.json` (1,000 search queries with their top results), imported into the `predictions` table with `backend/scripts/import_test_data.py`. Each row carries a primary intent (`main_intent`), optional secondary intents (`foreign_intent`) and the language of the query (`extra.detected_language`, stored in the `language` column).
 
-The provider's intent labels were unreliable: an audit of 100 rows (`data/intent_label_audit_100.csv`) found about half the primary intents wrong or debatable, mostly plain information lookups labelled commercial or transactional. All 1,000 rows were therefore relabelled on 2026-10-04, each judged from the query and its top six results against one rubric. `data/intent_labels.csv` holds, for every row, the reviewed labels, the provider's original labels, and the kind of query the ruling was based on.
+The provider's intent labels were unreliable: an audit of 100 rows (`data/intent_label_audit_100.csv`) found about half the primary intents wrong or debatable, mostly plain information lookups labelled commercial or transactional. All 1,000 rows were therefore relabelled on 2026-10-04, each judged from the query and its top six results against one rubric. `data/intent_labels.csv` holds, for every row, the reviewed labels and language, the provider's original values, and the kind of query the ruling was based on.
+
+**Only English queries are evaluated or trained on.** The provider's language field was as unreliable as its intents (101 rows flagged non-English, 11 really are), so the language of each query was reviewed too: 989 rows are `en`, 8 `es`, and one each `pt`, `fr` and `am`. A query made only of proper names counts as English, the dataset's search language. `/api/evaluate` and the Karpathy loop use the rows whose `language` equals `EVAL_LANGUAGE` (default `en`). A feedback-only query has no reviewed language, so it is included unless Laya's detector sees another script or accented text.
 
 ```bash
-python backend/scripts/apply_intent_labels.py                      # apply the reviewed labels (already done)
-python backend/scripts/apply_intent_labels.py --restore-original   # put the provider's labels back
+python backend/scripts/apply_intent_labels.py                      # apply the reviewed labels and languages (already done)
+python backend/scripts/apply_intent_labels.py --restore-original   # put the provider's values back
 ```
 
-Both commands update `data/test_db.json` and the `predictions` table together. Only the two intent fields change.
+Both commands update `data/test_db.json` and the `predictions` table together. Only the two intent fields and the language field change.
 
 ### Labelling rubric
 
@@ -216,6 +218,7 @@ TOP_N_FEEDBACK=5
 LAYA_MODEL_NAME=layalm/laya1
 LAYA_DEVICE=cpu
 EVAL_HOLDOUT_RATIO=0.1
+EVAL_LANGUAGE=en
 ```
 
 ### Run Backend
@@ -322,7 +325,7 @@ Each file should export a `classify(query: str, serp: List[SERPResult]) -> Tuple
 ### `backend/scripts/`
 
 - `import_test_data.py`: Import `data/test_db.json` into the `predictions` table as the golden dataset.
-- `apply_intent_labels.py`: Apply (or restore) the reviewed intent labels in `data/intent_labels.csv`.
+- `apply_intent_labels.py`: Apply (or restore) the reviewed intent labels and languages in `data/intent_labels.csv`.
 - `classify.py`: CLI to classify a JSONL file with a given model+version.
 - `eval.py`: CLI to eval a single (model, version) pair.
 

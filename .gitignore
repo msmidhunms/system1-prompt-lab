@@ -73,3 +73,5 @@ autoresearch/results.tsv
 autoresearch/runs/
 autoresearch/__pycache__/
 data/test_db.json
+autoresearch/checkpoints/
+data/*.csv
