@@ -217,8 +217,7 @@ export default function Dataset() {
               <p>{task.source ? `Source: ${task.source}.` : ''}</p>
               {task.import_status?.status === 'failed' && <p style={{ color: 'var(--critical)' }}>The last import failed: {task.import_status.message}</p>}
               <p className="small" style={{ marginTop: 8 }}>
-                {task.importable ? 'Or from a terminal: ' : ''}
-                <code>{task.setup_hint}</code>
+                {task.importable ? <>Or from a terminal: <code>{task.setup_hint}</code></> : task.setup_hint}
               </p>
               <p className="small muted" style={{ marginTop: 8 }}>Rows can also be added one at a time below.</p>
             </EmptyState>
