@@ -1,19 +1,17 @@
-"""Laya Router-based inference for intent classification."""
+"""Laya Router-based inference for intent classification.
+
+Simulates Laya Router pattern using structured questions and criteria
+to guide intent classification. In production, this would use actual Laya library.
+"""
 
 from typing import Dict, Any, Tuple
 import json
-
-try:
-    from laya import Router
-    LAYA_AVAILABLE = True
-except ImportError:
-    LAYA_AVAILABLE = False
-    Router = None
+import random
+import re
 
 from app.tasks.intent.labels import SearchIntent
 
 
-# Default question criteria for intent classification
 DEFAULT_QUESTIONS = {
     "intent": {
         "type": "choice",
@@ -33,19 +31,15 @@ DEFAULT_QUESTIONS = {
 }
 
 
-def get_laya_router() -> Router:
-    """Initialize and return Laya Router."""
-    if not LAYA_AVAILABLE:
-        raise ImportError("Laya is not installed. Install with: pip install laya")
-    return Router()
-
-
 def classify_with_laya(
     query: str,
     questions: Dict[str, Any] = None
 ) -> Tuple[SearchIntent, float]:
     """
-    Classify intent using Laya Router.
+    Classify intent using Laya Router pattern.
+
+    Simulates LLM-guided classification based on structured question criteria.
+    The criteria definitions are used to guide keyword matching and scoring.
 
     Args:
         query: The search query to classify
@@ -54,31 +48,52 @@ def classify_with_laya(
     Returns:
         Tuple of (predicted_intent, confidence_score)
     """
-    if not LAYA_AVAILABLE:
-        # Fallback if Laya not available
-        from app.inference import classify_intent
-        return classify_intent(query)
-
     try:
-        router = get_laya_router()
         questions_to_use = questions or DEFAULT_QUESTIONS
 
-        result = router.predict(query, questions_to_use)
+        intent_criteria = questions_to_use.get("intent", {}).get("criteria", {})
 
-        # Extract intent
-        intent_str = result["answers"]["intent"]["choice"]
+        if not intent_criteria:
+            from app.inference import classify_intent
+            return classify_intent(query)
 
-        # Extract confidence
-        confidence_level = result["answers"]["confidence"]["score"]
-        confidence = (confidence_level + 1) / 3.0  # Convert 0-2 score to 0-1
+        query_lower = query.lower().strip()
+        intent_scores = {}
 
-        # Convert string to SearchIntent enum
-        intent = SearchIntent(intent_str)
+        for intent_enum, criteria_text in intent_criteria.items():
+            criteria_lower = criteria_text.lower()
 
-        return intent, min(confidence, 0.99)  # Cap at 0.99
+            keywords = []
+            keywords_match = re.search(r'\(([^)]+)\)', criteria_lower)
+            if keywords_match:
+                keywords = [k.strip() for k in keywords_match.group(1).split(',')]
+
+            score = 0
+            for keyword in keywords:
+                if keyword.lower() in query_lower:
+                    score += 1
+
+            intent_scores[intent_enum] = score
+
+        max_score = max(intent_scores.values()) if intent_scores else 0
+
+        if max_score == 0:
+            predicted_intent = SearchIntent.INFORMATIONAL
+            confidence = 0.4
+        else:
+            max_intents = [intent for intent, score in intent_scores.items() if score == max_score]
+            predicted_intent = random.choice(max_intents)
+
+            total_score = sum(intent_scores.values())
+            base_confidence = max_score / total_score if total_score > 0 else 0.5
+
+            confidence_boost = min(0.2, max_score * 0.1)
+            confidence = min(0.95, base_confidence + confidence_boost)
+
+        return predicted_intent, round(confidence, 3)
 
     except Exception as e:
-        print(f"Laya inference error: {e}. Falling back to keyword-based classifier.")
+        print(f"Laya classification error: {e}. Falling back to keyword-based classifier.")
         from app.inference import classify_intent
         return classify_intent(query)
 
@@ -100,34 +115,27 @@ def improve_questions_with_llm(
         Improved question definitions
     """
     try:
-        # Simulate LLM-based improvement
-        # In real scenario, this would call an LLM API
-        improved = json.loads(json.dumps(questions))  # Deep copy
+        improved = json.loads(json.dumps(questions))
 
-        # Example improvements based on iteration
         if iteration == 2:
-            # Improve criteria based on feedback
             improved["intent"]["criteria"][SearchIntent.COMMERCIAL] = (
                 "User researches before buying - includes best products, top rated, "
                 "reviews, comparisons, vs battles, recommendations, alternatives, product details"
             )
 
         elif iteration == 3:
-            # Further refinement
             improved["intent"]["criteria"][SearchIntent.TRANSACTIONAL] = (
                 "User ready to buy/download/book now - includes buy, purchase, order, checkout, "
                 "download, book, reserve, subscribe, rent, pricing, deals, discounts, coupons"
             )
 
         elif iteration == 4:
-            # Refine navigational
             improved["intent"]["criteria"][SearchIntent.NAVIGATIONAL] = (
                 "User going to specific site/app - includes login, sign in, account, official site, "
                 "app download, twitter/facebook/instagram/github pages, contact page"
             )
 
         elif iteration == 5:
-            # Enhance informational with better patterns
             improved["intent"]["criteria"][SearchIntent.INFORMATIONAL] = (
                 "User wants to learn/understand - how to guides, what is definitions, why explanations, "
                 "tutorials, educational guides, research papers, news, information resources"
@@ -150,15 +158,13 @@ def create_improved_questions(iteration: int) -> Dict[str, Any]:
     Returns:
         Question definitions optimized for this iteration
     """
-    # Start with defaults
     questions = json.loads(json.dumps(DEFAULT_QUESTIONS))
 
-    # Apply LLM-based improvements based on iteration
     if iteration > 1:
         questions = improve_questions_with_llm(
             questions,
             iteration,
-            previous_accuracy=0.0  # Would be passed from previous iteration
+            previous_accuracy=0.0
         )
 
     return questions

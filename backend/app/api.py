@@ -267,7 +267,8 @@ async def run_karpathy_loop(
         except:
             pred_intent, _ = classify_intent(record.query)
         true_intent = record.predicted_intent
-        if pred_intent.value == true_intent:
+        pred_value = pred_intent.value if hasattr(pred_intent, 'value') else str(pred_intent)
+        if pred_value == true_intent:
             correct_baseline += 1
 
     baseline_accuracy = correct_baseline / len(test_records)
@@ -291,7 +292,8 @@ async def run_karpathy_loop(
                 pred_intent, _ = classify_intent_v2(record.query) if i % 2 == 0 else classify_intent(record.query)
 
             true_intent = record.predicted_intent
-            if pred_intent.value == true_intent:
+            pred_value = pred_intent.value if hasattr(pred_intent, 'value') else str(pred_intent)
+            if pred_value == true_intent:
                 correct_improved += 1
 
         current_accuracy = correct_improved / len(test_records)
@@ -508,8 +510,15 @@ async def run_evaluation(
         true_intent = record.predicted_intent
         true_labels.append(true_intent)
 
-        # Run prediction on the keyword
-        pred_intent, confidence = classify_intent(record.query)
+        # Run prediction on the keyword based on model
+        if model == "laya":
+            try:
+                pred_intent, confidence = classify_with_laya(record.query)
+            except:
+                pred_intent, confidence = classify_intent(record.query)
+        else:
+            pred_intent, confidence = classify_intent(record.query)
+
         predicted_labels.append(pred_intent.value)
 
         per_case_results.append({
