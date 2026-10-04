@@ -133,6 +133,19 @@ export default function Evaluation() {
             </select>
           </div>
 
+          <div className="control-group">
+            <label htmlFor="sample-size">Sample Size:</label>
+            <input
+              id="sample-size"
+              type="number"
+              value={sampleSize}
+              onChange={(e) => setSampleSize(Math.max(10, Math.min(10000, parseInt(e.target.value) || 100)))}
+              disabled={loading}
+              min="10"
+              max="10000"
+            />
+          </div>
+
           <button
             onClick={handleAnalyze}
             disabled={loading}
