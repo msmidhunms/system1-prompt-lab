@@ -211,13 +211,12 @@ def build_user_prompt(
     return "\n".join(lines)
 
 
-def propose(llm_config: Dict[str, Any], user_prompt: str) -> Tuple[Dict[str, Any], str, List[str], str]:
-    """Ask the LLM for the next config. Returns (config, hypothesis, warnings, raw reply)."""
-    raw = llm.complete(llm_config, SYSTEM_PROMPT, user_prompt)
-    proposal = llm.extract_json(raw)
+def parse_proposal(raw_reply: str) -> Tuple[Dict[str, Any], str, List[str]]:
+    """Turn the LLM's reply into (config, hypothesis, warnings)."""
+    proposal = llm.extract_json(raw_reply)
     config, warnings = validate_config(proposal)
     hypothesis = str(proposal.get("hypothesis", "")).strip() or "(no hypothesis given)"
-    return config, hypothesis, warnings, raw
+    return config, hypothesis, warnings
 
 
 # ---------------------------------------------------------------- run state
@@ -416,7 +415,8 @@ def _run_loop(run: Dict[str, Any], dev: List[Dict[str, str]], holdout: List[Dict
             entry: Dict[str, Any] = {"iteration": i, "timestamp": _now()}
             raw_reply = None
             try:
-                candidate, hypothesis, warnings, raw_reply = propose(llm_config, user_prompt)
+                raw_reply = llm.complete(llm_config, SYSTEM_PROMPT, user_prompt)
+                candidate, hypothesis, warnings = parse_proposal(raw_reply)
             except (llm.LLMError, ValueError) as e:
                 consecutive_crashes += 1
                 entry.update(status="crash", error=str(e), hypothesis=None, config=None,
