@@ -1,27 +1,62 @@
 """API routes for System 1 experiments."""
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from datetime import datetime
+from typing import Optional
 import uuid
 import json
 
 from app.database import get_db, PredictionRecord, FeedbackRecord, ModelVersion, ExperimentRun
-from app.tasks.intent.schema import Prediction, FeedbackEntry, TestCase
 from app.tasks.intent.labels import SearchIntent
 from app.inference import classify_intent, classify_intent_v2
 
 router = APIRouter(prefix="/api", tags=["api"])
 
 
+# Request models
+class PredictRequest(BaseModel):
+    query: str
+    model: str = "laya"
+    version: str = "v1_baseline"
+
+
+class FeedbackRequest(BaseModel):
+    query: str
+    predicted_intent: str
+    feedback_type: str
+    corrected_intent: Optional[str] = None
+    confidence: float = 0.0
+    notes: Optional[str] = None
+    model: str = "laya"
+    version: str = "v1_baseline"
+
+
+class KarpathyLoopRequest(BaseModel):
+    golden_data_ids: Optional[list] = None
+    loops: int = 10
+    baseline_model: str = "laya"
+    baseline_version: str = "v1_baseline"
+
+
+class SaveModelRequest(BaseModel):
+    model_name: str
+    base_version: str
+    accuracy: float
+    description: Optional[str] = None
+
+
 @router.post("/predict")
 async def predict(
-    query: str,
-    model: str = "laya",
-    version: str = "v1_baseline",
+    request: PredictRequest,
     db: Session = Depends(get_db)
 ):
     """Get intent prediction for a query."""
+    query = request.query
+    model = request.model
+    version = request.version
+
     if not query or not query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
@@ -58,17 +93,19 @@ async def predict(
 
 @router.post("/feedback")
 async def submit_feedback(
-    query: str,
-    predicted_intent: str,
-    feedback_type: str,
-    corrected_intent: str = None,
-    confidence: float = 0.0,
-    notes: str = None,
-    model: str = "laya",
-    version: str = "v1_baseline",
+    request: FeedbackRequest,
     db: Session = Depends(get_db)
 ):
     """Submit user feedback for a prediction."""
+    query = request.query
+    predicted_intent = request.predicted_intent
+    feedback_type = request.feedback_type
+    corrected_intent = request.corrected_intent
+    confidence = request.confidence
+    notes = request.notes
+    model = request.model
+    version = request.version
+
     # Validate feedback type
     if feedback_type not in ["correct", "incorrect", "unsure"]:
         raise HTTPException(status_code=400, detail="Invalid feedback type")
@@ -104,6 +141,9 @@ async def submit_feedback(
 async def get_golden_data(db: Session = Depends(get_db)):
     """Get all feedback records (golden dataset)."""
     feedbacks = db.query(FeedbackRecord).all()
+
+    if not feedbacks:
+        return []
 
     # Group by query to get unique data points
     golden_data = {}
@@ -142,13 +182,15 @@ async def get_golden_data(db: Session = Depends(get_db)):
 
 @router.post("/karpathy-loop")
 async def run_karpathy_loop(
-    golden_data_ids: list = None,
-    loops: int = 10,
-    baseline_model: str = "laya",
-    baseline_version: str = "v1_baseline",
+    request: KarpathyLoopRequest,
     db: Session = Depends(get_db)
 ):
     """Run Karpathy loop for model improvement."""
+    golden_data_ids = request.golden_data_ids
+    loops = request.loops
+    baseline_model = request.baseline_model
+    baseline_version = request.baseline_version
+
     if not golden_data_ids or len(golden_data_ids) == 0:
         raise HTTPException(status_code=400, detail="No golden data provided")
 
@@ -228,13 +270,15 @@ async def run_karpathy_loop(
 
 @router.post("/save-model")
 async def save_model(
-    model_name: str,
-    base_version: str,
-    accuracy: float,
-    description: str = None,
+    request: SaveModelRequest,
     db: Session = Depends(get_db)
 ):
     """Save an improved model."""
+    model_name = request.model_name
+    base_version = request.base_version
+    accuracy = request.accuracy
+    description = request.description
+
     if not model_name or not model_name.strip():
         raise HTTPException(status_code=400, detail="Model name cannot be empty")
 
