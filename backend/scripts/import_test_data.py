@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Import test data from test_db.json into the database.  Use reference data for intent classification and feedback testing. https://docs.dataforseo.com/v3/databases-google-serp_regular/"""
+"""Import test data from test_db.json into the database."""
 
 import json
 import sys
 import uuid
 from pathlib import Path
+import os
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+# Add parent directory to path for imports
+backend_dir = Path(__file__).parent.parent
+sys.path.insert(0, str(backend_dir))
+os.chdir(backend_dir)
 
 from app.database import SessionLocal, PredictionRecord
 from app.config import DATA_DIR
