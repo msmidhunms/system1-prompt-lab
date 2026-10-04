@@ -11,10 +11,16 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 DB_PATH = PROJECT_ROOT / "backend" / "data.db"
 MODELS_CACHE_DIR = PROJECT_ROOT / "models_cache"
+AUTORESEARCH_DIR = PROJECT_ROOT / "autoresearch"
+RUNS_DIR = AUTORESEARCH_DIR / "runs"
+CHECKPOINTS_DIR = AUTORESEARCH_DIR / "checkpoints"
+RESULTS_TSV = AUTORESEARCH_DIR / "results.tsv"
 
 # Create directories if they don't exist
 DATA_DIR.mkdir(exist_ok=True)
 MODELS_CACHE_DIR.mkdir(exist_ok=True)
+RUNS_DIR.mkdir(parents=True, exist_ok=True)
+CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Environment settings
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"

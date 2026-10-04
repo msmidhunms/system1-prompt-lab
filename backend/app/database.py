@@ -75,6 +75,15 @@ class ExperimentRun(Base):
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
+class AppSetting(Base):
+    """Key/value store for app settings (e.g. the LLM used by the Karpathy loop)."""
+    __tablename__ = "app_settings"
+
+    key = Column(String, primary_key=True)
+    value = Column(JSON, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 Base.metadata.create_all(bind=engine)
 
 
