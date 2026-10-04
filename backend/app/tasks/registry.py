@@ -9,10 +9,8 @@ particular example.
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from app.config import EVAL_LANGUAGE
+from app.config import DEFAULT_TASK_ID, EVAL_LANGUAGE
 from app.tasks.intent.labels import SearchIntent
-
-DEFAULT_TASK_ID = "search_intent"
 
 QUESTION_TYPES = ("choice", "noul")
 

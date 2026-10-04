@@ -1,10 +1,12 @@
 """Database setup and models."""
 
-from sqlalchemy import create_engine, inspect, text, Column, String, Float, Integer, DateTime, Text, Boolean, JSON
+from sqlalchemy import (
+    create_engine, inspect, text, Column, String, Float, Integer, DateTime, Text, Boolean, JSON, UniqueConstraint,
+)
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
-from app.config import SQLALCHEMY_DATABASE_URL
+from app.config import DEFAULT_TASK_ID, SQLALCHEMY_DATABASE_URL
 
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
@@ -15,12 +17,49 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
+class GoldenRow(Base):
+    """One labelled input of an example's golden dataset."""
+    __tablename__ = "golden_rows"
+    __table_args__ = (UniqueConstraint("task_id", "input_key", name="uq_golden_rows_task_input"),)
+
+    id = Column(String, primary_key=True)
+    task_id = Column(String, nullable=False, index=True)
+    input_text = Column(Text, nullable=False)
+    # Hash of the input with case and spacing normalised: what decides whether an added row is new.
+    input_key = Column(String, nullable=False)
+    label = Column(String, nullable=False, index=True)
+    secondary_labels = Column(JSON, nullable=True)
+    language = Column(String, nullable=True, index=True)  # None when the task has no language filter
+    source = Column(String, nullable=False, default="manual")  # 'imported', 'manual' or 'feedback'
+    meta = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class EvaluationRun(Base):
+    """A saved model evaluation: its summary columns plus the full result as returned by the API."""
+    __tablename__ = "evaluation_runs"
+
+    id = Column(String, primary_key=True)
+    task_id = Column(String, nullable=False, index=True)
+    model = Column(String, nullable=False)
+    version = Column(String, nullable=False)
+    sample_size = Column(Integer, nullable=False)
+    total_cases = Column(Integer, nullable=False)
+    accuracy = Column(Float, nullable=False)
+    macro_f1 = Column(Float, nullable=False)
+    result = Column(JSON, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
 class PredictionRecord(Base):
-    """Store model predictions."""
+    """Store live model predictions (the log of what was asked in the Try It tab)."""
     __tablename__ = "predictions"
 
     id = Column(String, primary_key=True)
-    query = Column(String, nullable=False, index=True)
+    task_id = Column(String, nullable=False, default=DEFAULT_TASK_ID, index=True)
+    # The input text and predicted label. The column names date from when search intent was the only example.
+    query = Column(Text, nullable=False, index=True)
     predicted_intent = Column(String, nullable=False)
     secondary_intents = Column(JSON, nullable=True)  # Store list of secondary intents
     language = Column(String, nullable=True, index=True)  # Language of the query wording (e.g. 'en'); None if unknown
@@ -35,7 +74,8 @@ class FeedbackRecord(Base):
     __tablename__ = "feedback"
 
     id = Column(String, primary_key=True)
-    query = Column(String, nullable=False, index=True)
+    task_id = Column(String, nullable=False, default=DEFAULT_TASK_ID, index=True)
+    query = Column(Text, nullable=False, index=True)
     predicted_intent = Column(String, nullable=False)
     feedback_type = Column(String, nullable=False)  # 'correct', 'incorrect', 'unsure'
     corrected_intent = Column(String, nullable=True)  # Only if feedback_type != 'correct'
@@ -51,6 +91,7 @@ class ModelVersion(Base):
     __tablename__ = "model_versions"
 
     id = Column(String, primary_key=True)
+    task_id = Column(String, nullable=False, default=DEFAULT_TASK_ID, index=True)
     model_name = Column(String, nullable=False)
     version = Column(String, nullable=False, unique=True)
     accuracy = Column(Float, nullable=False)
@@ -65,6 +106,7 @@ class ExperimentRun(Base):
     __tablename__ = "experiment_runs"
 
     id = Column(String, primary_key=True)
+    task_id = Column(String, nullable=False, default=DEFAULT_TASK_ID, index=True)
     baseline_model = Column(String, nullable=False)
     baseline_version = Column(String, nullable=False)
     baseline_accuracy = Column(Float, nullable=False)
@@ -90,11 +132,19 @@ Base.metadata.create_all(bind=engine)
 
 def _add_missing_columns():
     """create_all does not alter existing tables, so add columns introduced after a table was created."""
-    existing = {column["name"] for column in inspect(engine).get_columns("predictions")}
-    if "language" not in existing:
+    added = {
+        "predictions": {"language": "VARCHAR", "task_id": f"VARCHAR NOT NULL DEFAULT '{DEFAULT_TASK_ID}'"},
+        "feedback": {"task_id": f"VARCHAR NOT NULL DEFAULT '{DEFAULT_TASK_ID}'"},
+        "model_versions": {"task_id": f"VARCHAR NOT NULL DEFAULT '{DEFAULT_TASK_ID}'"},
+        "experiment_runs": {"task_id": f"VARCHAR NOT NULL DEFAULT '{DEFAULT_TASK_ID}'"},
+    }
+    for table, columns in added.items():
+        existing = {column["name"] for column in inspect(engine).get_columns(table)}
         with engine.begin() as conn:
-            conn.execute(text("ALTER TABLE predictions ADD COLUMN language VARCHAR"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_predictions_language ON predictions (language)"))
+            for name, definition in columns.items():
+                if name not in existing:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {definition}"))
+                    conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table}_{name} ON {table} ({name})"))
 
 
 _add_missing_columns()

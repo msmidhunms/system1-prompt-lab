@@ -9,7 +9,7 @@ load_dotenv()
 # Project paths
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
-DB_PATH = PROJECT_ROOT / "backend" / "data.db"
+DB_PATH = Path(os.getenv("DB_PATH") or PROJECT_ROOT / "backend" / "data.db")  # DB_PATH: tests use a throwaway file
 MODELS_CACHE_DIR = PROJECT_ROOT / "models_cache"
 AUTORESEARCH_DIR = PROJECT_ROOT / "autoresearch"
 RUNS_DIR = AUTORESEARCH_DIR / "runs"
@@ -39,6 +39,9 @@ API_PORT = int(os.getenv("API_PORT", "8000"))
 
 # Frontend
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+
+# Examples: data saved before there were several examples has no task and belongs to this one
+DEFAULT_TASK_ID = "search_intent"
 
 # Eval
 EVAL_HOLDOUT_RATIO = float(os.getenv("EVAL_HOLDOUT_RATIO", "0.1"))  # 10% holdout
