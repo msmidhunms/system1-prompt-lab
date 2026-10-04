@@ -83,8 +83,18 @@ export default function KarpathyLoop() {
   }
 
   const startKarpathyLoop = async () => {
-    if (goldenData.length === 0) {
+    if (stats.total_golden_data === 0) {
       setError('No data in golden dataset. Please add some feedback first.')
+      return
+    }
+
+    if (sampleSize < 10 || sampleSize > 10000) {
+      setError('Sample size must be between 10 and 10000')
+      return
+    }
+
+    if (numLoops < 1 || numLoops > 100) {
+      setError('Number of loops must be between 1 and 100')
       return
     }
 
@@ -93,12 +103,15 @@ export default function KarpathyLoop() {
     setResults(null)
 
     try {
-      // TODO: Replace with actual API endpoint
       const response = await axios.post('http://localhost:8000/api/karpathy-loop', {
         golden_data_ids: goldenData.map((d) => d.id),
-        loops: 10,
+        loops: numLoops,
         baseline_model: 'laya',
         baseline_version: 'v1_baseline',
+      }, {
+        params: {
+          sample_size: sampleSize,
+        }
       })
 
       setResults(response.data)
@@ -175,13 +188,42 @@ export default function KarpathyLoop() {
         </div>
 
         {stats.total_golden_data > 0 && (
-          <button
-            onClick={startKarpathyLoop}
-            disabled={running}
-            className="start-loop-btn"
-          >
-            {running ? 'Running Experiment...' : 'Start Karpathy Loop (10 Iterations)'}
-          </button>
+          <div className="loop-controls">
+            <div className="control-group">
+              <label htmlFor="sample-size">Sample Size:</label>
+              <input
+                id="sample-size"
+                type="number"
+                value={sampleSize}
+                onChange={(e) => setSampleSize(Math.max(10, Math.min(10000, parseInt(e.target.value) || 100)))}
+                disabled={running}
+                min="10"
+                max="10000"
+              />
+              <span className="control-hint">({Math.min(sampleSize, stats.total_golden_data)} of {stats.total_golden_data} available)</span>
+            </div>
+
+            <div className="control-group">
+              <label htmlFor="num-loops">Number of Loops:</label>
+              <input
+                id="num-loops"
+                type="number"
+                value={numLoops}
+                onChange={(e) => setNumLoops(Math.max(1, Math.min(100, parseInt(e.target.value) || 10)))}
+                disabled={running}
+                min="1"
+                max="100"
+              />
+            </div>
+
+            <button
+              onClick={startKarpathyLoop}
+              disabled={running}
+              className="start-loop-btn"
+            >
+              {running ? 'Running Experiment...' : `Start Karpathy Loop (${numLoops} Iterations)`}
+            </button>
+          </div>
         )}
 
         {error && <div className="error-message">{error}</div>}
