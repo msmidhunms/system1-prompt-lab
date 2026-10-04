@@ -559,6 +559,10 @@
   cursor: not-allowed;
 }
 
+.golden-data-summary .control-hint {
+  margin: 1rem 0 0;
+}
+
 .llm-settings .control-hint {
   margin: 0.75rem 0 0;
 }
