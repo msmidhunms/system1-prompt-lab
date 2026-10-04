@@ -6,6 +6,7 @@ and the description of each intent label. The labels themselves are fixed.
 """
 
 import json
+import re
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -137,7 +138,12 @@ def classify_with_laya(
 
 # ---------------------------------------------------------------- saved versions
 
+VERSION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
 def checkpoint_path(version: str):
+    if not VERSION_NAME_RE.match(version):
+        raise ValueError("version names may only contain letters, digits, '_', '-' and '.'")
     return CHECKPOINTS_DIR / f"{version}.json"
 
 
@@ -147,11 +153,14 @@ def save_checkpoint(version: str, payload: Dict[str, Any]) -> None:
 
 
 def load_version_config(version: Optional[str]) -> Dict[str, Any]:
-    """Return the prompt config saved under a version name (baseline if there is none)."""
+    """Return the prompt config saved under a version name.
+
+    Raises ValueError for a version that is neither the baseline nor a saved checkpoint.
+    """
     if not version or version == BASELINE_VERSION:
         return DEFAULT_CONFIG
     path = checkpoint_path(version)
     if not path.exists():
-        return DEFAULT_CONFIG
+        raise ValueError(f"No saved model version named '{version}'")
     with open(path, encoding="utf-8") as f:
         return json.load(f)["config"]
