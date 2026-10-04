@@ -381,7 +381,7 @@ def start_karpathy_loop(request: KarpathyLoopRequest, db: Session = Depends(get_
         in_language = f" in language '{task.language}'" if task.language else ""
         raise HTTPException(
             status_code=400,
-            detail=f"Need at least 20 labelled golden {task.items}{in_language}. Import the dataset in the Golden Dataset tab."
+            detail=f"Need at least 20 labelled golden {task.items}{in_language}. Add data in the Dataset tab."
         )
 
     try:
