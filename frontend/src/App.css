@@ -9,8 +9,53 @@ header {
   margin-bottom: 2rem;
 }
 
+.header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.task-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.task-picker label {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 0.85em;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.task-picker select {
+  padding: 0.6rem 1rem;
+  min-width: 240px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 2px solid rgba(100, 108, 255, 0.5);
+  border-radius: 8px;
+  color: inherit;
+  font-size: 1em;
+  font-weight: 600;
+}
+
+.task-summary {
+  margin: 0 0 1.25rem 0;
+  font-size: 0.95em;
+  opacity: 0.7;
+}
+
+.app-status {
+  padding: 4rem 2rem;
+  text-align: center;
+  opacity: 0.8;
+}
+
 h1 {
-  margin: 0 0 1.5rem 0;
+  margin: 0;
   font-size: 2.5em;
   background: linear-gradient(135deg, #646cff 0%, #535bf2 100%);
   -webkit-background-clip: text;
@@ -59,6 +104,14 @@ p {
 }
 
 @media (prefers-color-scheme: light) {
+  .task-picker label {
+    color: rgba(0, 0, 0, 0.6);
+  }
+
+  .task-picker select {
+    background: #fff;
+  }
+
   header {
     border-color: rgba(0, 0, 0, 0.1);
   }
