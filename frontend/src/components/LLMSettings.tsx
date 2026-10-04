@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 import axios from 'axios'
-
-const API = 'http://localhost:8000/api'
+import { API, apiError } from '../api'
 
 interface ProviderInfo {
   label: string
@@ -25,15 +24,6 @@ interface LLMConfig {
 interface Props {
   disabled?: boolean
   onActiveChange?: (label: string) => void
-}
-
-export function apiError(err: unknown, fallback: string): string {
-  if (axios.isAxiosError(err)) {
-    const detail = err.response?.data?.detail
-    if (typeof detail === 'string') return detail
-    return err.message
-  }
-  return err instanceof Error ? err.message : fallback
 }
 
 export default function LLMSettings({ disabled = false, onActiveChange }: Props) {
