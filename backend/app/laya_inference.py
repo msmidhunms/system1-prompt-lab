@@ -1,170 +1,157 @@
-"""Laya Router-based inference for intent classification.
+"""Laya Router inference for intent classification.
 
-Simulates Laya Router pattern using structured questions and criteria
-to guide intent classification. In production, this would use actual Laya library.
+A "prompt config" is everything the Karpathy loop is allowed to change about a
+Laya call: how the query is rendered into the state, the question instructions,
+and the description of each intent label. The labels themselves are fixed.
 """
 
-from typing import Dict, Any, Tuple
 import json
-import random
-import re
+import threading
+from typing import Any, Dict, List, Optional, Tuple
 
+from app.config import CHECKPOINTS_DIR, LAYA_DEVICE
 from app.tasks.intent.labels import SearchIntent
 
+QUESTION_ID = "intent"
+BASELINE_VERSION = "v1_baseline"
 
-DEFAULT_QUESTIONS = {
-    "intent": {
-        "type": "choice",
-        "instructions": "Classify the search query intent based on what the user is trying to accomplish.",
-        "criteria": {
-            SearchIntent.INFORMATIONAL: "User seeks information, education, or knowledge (how to, what is, why, explain, tutorial, guide, learn, research)",
-            SearchIntent.NAVIGATIONAL: "User seeks to reach a specific website or resource (login, sign in, account, official, facebook, gmail, twitter, instagram, github, homepage)",
-            SearchIntent.COMMERCIAL: "User researches products/services before purchasing (best, top, review, comparison, vs, recommended, alternative, verdict)",
-            SearchIntent.TRANSACTIONAL: "User intends to complete a transaction (buy, purchase, order, download, book, reserve, subscribe, rent, price, cost, deal)",
-        }
+# Laya silently keeps only the first 48 tokens of each option description, and the
+# whole question (instructions + options) must fit its 192-token head budget.
+MAX_CRITERION_WORDS = 35
+MAX_INSTRUCTION_WORDS = 60
+
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "state_template": "{query}",
+    "instructions": "Classify the search query intent based on what the user is trying to accomplish.",
+    "criteria": {
+        SearchIntent.INFORMATIONAL.value: "User seeks information, education, or knowledge (how to, what is, why, explain, tutorial, guide)",
+        SearchIntent.NAVIGATIONAL.value: "User seeks to reach a specific website or resource (login, sign in, account, official site, brand name)",
+        SearchIntent.COMMERCIAL.value: "User researches products/services before purchasing (best, top, review, comparison, vs, alternative)",
+        SearchIntent.TRANSACTIONAL.value: "User intends to complete a transaction (buy, purchase, order, download, book, subscribe, price, deal)",
     },
-    "confidence": {
-        "type": "score",
-        "instructions": "How confident are you in this classification?",
-        "criteria": ["low confidence", "medium confidence", "high confidence"]
-    }
 }
+
+_router = None
+_router_lock = threading.Lock()
+
+
+def get_router():
+    """Return the shared Laya Router, building it on first use."""
+    global _router
+    with _router_lock:
+        if _router is None:
+            from laya import Router
+            _router = Router(device=LAYA_DEVICE)
+        return _router
+
+
+def validate_config(config: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    """Check a prompt config and return (normalised config, warnings).
+
+    Raises ValueError when the config cannot be used at all.
+    """
+    if not isinstance(config, dict):
+        raise ValueError("config must be a JSON object")
+
+    template = config.get("state_template", DEFAULT_CONFIG["state_template"])
+    if not isinstance(template, str) or "{query}" not in template:
+        raise ValueError("state_template must be a string containing {query}")
+
+    instructions = config.get("instructions")
+    if not isinstance(instructions, str) or not instructions.strip():
+        raise ValueError("instructions must be a non-empty string")
+
+    criteria = config.get("criteria")
+    labels = SearchIntent.all_labels()
+    if not isinstance(criteria, dict) or set(criteria) != set(labels):
+        raise ValueError(f"criteria must have exactly these keys: {labels}")
+    for label in labels:
+        if not isinstance(criteria[label], str) or not criteria[label].strip():
+            raise ValueError(f"criteria['{label}'] must be a non-empty string")
+
+    warnings = []
+    if len(instructions.split()) > MAX_INSTRUCTION_WORDS:
+        warnings.append(f"instructions are over {MAX_INSTRUCTION_WORDS} words and may be truncated")
+    for label in labels:
+        if len(criteria[label].split()) > MAX_CRITERION_WORDS:
+            warnings.append(f"criteria['{label}'] is over {MAX_CRITERION_WORDS} words; Laya ignores the tail")
+
+    normalised = {
+        "state_template": template,
+        "instructions": instructions.strip(),
+        # Fixed label order: option order is part of what the model sees.
+        "criteria": {label: criteria[label].strip() for label in labels},
+    }
+    return normalised, warnings
+
+
+def build_questions(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Turn a prompt config into the `questions` dict Router.predict expects."""
+    return {
+        QUESTION_ID: {
+            "type": "choice",
+            "instructions": config["instructions"],
+            "criteria": dict(config["criteria"]),
+        }
+    }
+
+
+def render_state(config: Dict[str, Any], query: str) -> str:
+    return config["state_template"].replace("{query}", query)
+
+
+def predict_batch(
+    queries: List[str],
+    config: Optional[Dict[str, Any]] = None,
+    batch_size: int = 32,
+) -> List[Dict[str, Any]]:
+    """Classify many queries with one prompt config.
+
+    Returns one {"intent", "confidence", "probabilities"} dict per query, in order.
+    """
+    config = config or DEFAULT_CONFIG
+    questions = build_questions(config)
+    requests = [{"state": render_state(config, q), "questions": questions} for q in queries]
+    results = get_router().predict_batch(requests, batch_size=batch_size)
+
+    predictions = []
+    for result in results:
+        answer = result["answers"][QUESTION_ID]
+        choice = answer["choice"]
+        predictions.append({
+            "intent": choice,
+            "confidence": round(float(answer["probabilities"][choice]), 4),
+            "probabilities": answer["probabilities"],
+        })
+    return predictions
 
 
 def classify_with_laya(
     query: str,
-    questions: Dict[str, Any] = None
+    config: Optional[Dict[str, Any]] = None,
 ) -> Tuple[SearchIntent, float]:
-    """
-    Classify intent using Laya Router pattern.
-
-    Simulates LLM-guided classification based on structured question criteria.
-    The criteria definitions are used to guide keyword matching and scoring.
-
-    Args:
-        query: The search query to classify
-        questions: Custom question definitions (uses defaults if None)
-
-    Returns:
-        Tuple of (predicted_intent, confidence_score)
-    """
-    try:
-        questions_to_use = questions or DEFAULT_QUESTIONS
-
-        intent_criteria = questions_to_use.get("intent", {}).get("criteria", {})
-
-        if not intent_criteria:
-            from app.inference import classify_intent
-            return classify_intent(query)
-
-        query_lower = query.lower().strip()
-        intent_scores = {}
-
-        for intent_enum, criteria_text in intent_criteria.items():
-            criteria_lower = criteria_text.lower()
-
-            keywords = []
-            keywords_match = re.search(r'\(([^)]+)\)', criteria_lower)
-            if keywords_match:
-                keywords = [k.strip() for k in keywords_match.group(1).split(',')]
-
-            score = 0
-            for keyword in keywords:
-                if keyword.lower() in query_lower:
-                    score += 1
-
-            intent_scores[intent_enum] = score
-
-        max_score = max(intent_scores.values()) if intent_scores else 0
-
-        if max_score == 0:
-            predicted_intent = SearchIntent.INFORMATIONAL
-            confidence = 0.4
-        else:
-            max_intents = [intent for intent, score in intent_scores.items() if score == max_score]
-            predicted_intent = random.choice(max_intents)
-
-            total_score = sum(intent_scores.values())
-            base_confidence = max_score / total_score if total_score > 0 else 0.5
-
-            confidence_boost = min(0.2, max_score * 0.1)
-            confidence = min(0.95, base_confidence + confidence_boost)
-
-        return predicted_intent, round(confidence, 3)
-
-    except Exception as e:
-        print(f"Laya classification error: {e}. Falling back to keyword-based classifier.")
-        from app.inference import classify_intent
-        return classify_intent(query)
+    """Classify one query. Returns (predicted_intent, confidence)."""
+    prediction = predict_batch([query], config)[0]
+    return SearchIntent(prediction["intent"]), prediction["confidence"]
 
 
-def improve_questions_with_llm(
-    questions: Dict[str, Any],
-    iteration: int,
-    previous_accuracy: float
-) -> Dict[str, Any]:
-    """
-    Use an LLM to improve the question criteria descriptions.
+# ---------------------------------------------------------------- saved versions
 
-    Args:
-        questions: Current question definitions
-        iteration: Current loop iteration number
-        previous_accuracy: Accuracy from previous iteration
-
-    Returns:
-        Improved question definitions
-    """
-    try:
-        improved = json.loads(json.dumps(questions))
-
-        if iteration == 2:
-            improved["intent"]["criteria"][SearchIntent.COMMERCIAL] = (
-                "User researches before buying - includes best products, top rated, "
-                "reviews, comparisons, vs battles, recommendations, alternatives, product details"
-            )
-
-        elif iteration == 3:
-            improved["intent"]["criteria"][SearchIntent.TRANSACTIONAL] = (
-                "User ready to buy/download/book now - includes buy, purchase, order, checkout, "
-                "download, book, reserve, subscribe, rent, pricing, deals, discounts, coupons"
-            )
-
-        elif iteration == 4:
-            improved["intent"]["criteria"][SearchIntent.NAVIGATIONAL] = (
-                "User going to specific site/app - includes login, sign in, account, official site, "
-                "app download, twitter/facebook/instagram/github pages, contact page"
-            )
-
-        elif iteration == 5:
-            improved["intent"]["criteria"][SearchIntent.INFORMATIONAL] = (
-                "User wants to learn/understand - how to guides, what is definitions, why explanations, "
-                "tutorials, educational guides, research papers, news, information resources"
-            )
-
-        return improved
-
-    except Exception as e:
-        print(f"LLM improvement error: {e}. Returning original questions.")
-        return questions
+def checkpoint_path(version: str):
+    return CHECKPOINTS_DIR / f"{version}.json"
 
 
-def create_improved_questions(iteration: int) -> Dict[str, Any]:
-    """
-    Create iteratively improved question definitions.
+def save_checkpoint(version: str, payload: Dict[str, Any]) -> None:
+    with open(checkpoint_path(version), "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
 
-    Args:
-        iteration: Current loop iteration (1-10)
 
-    Returns:
-        Question definitions optimized for this iteration
-    """
-    questions = json.loads(json.dumps(DEFAULT_QUESTIONS))
-
-    if iteration > 1:
-        questions = improve_questions_with_llm(
-            questions,
-            iteration,
-            previous_accuracy=0.0
-        )
-
-    return questions
+def load_version_config(version: Optional[str]) -> Dict[str, Any]:
+    """Return the prompt config saved under a version name (baseline if there is none)."""
+    if not version or version == BASELINE_VERSION:
+        return DEFAULT_CONFIG
+    path = checkpoint_path(version)
+    if not path.exists():
+        return DEFAULT_CONFIG
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)["config"]
