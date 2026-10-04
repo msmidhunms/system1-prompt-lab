@@ -1,0 +1,31 @@
+.App {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+header {
+  border-bottom: 2px solid rgba(255, 255, 255, 0.1);
+  padding-bottom: 1rem;
+  margin-bottom: 2rem;
+}
+
+h1 {
+  margin: 0;
+  font-size: 2.5em;
+}
+
+main {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+p {
+  font-size: 1.1em;
+  opacity: 0.8;
+}
+
+button {
+  align-self: flex-start;
+}
