@@ -554,6 +554,10 @@
   cursor: not-allowed;
 }
 
+.llm-settings .control-hint {
+  margin: 0.75rem 0 0;
+}
+
 .llm-actions {
   display: flex;
   flex-wrap: wrap;
