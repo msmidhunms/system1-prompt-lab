@@ -1,18 +1,19 @@
-"""Laya Router inference for intent classification.
+"""Laya Router inference for the examples in app.tasks.registry.
 
 A "prompt config" is everything about a Laya call that can vary between model
-versions:
+versions of one task:
 
-- state_template: how the query is rendered into the state. Either a string, or a
+- state_template: how the input text is rendered into the state. Either a string, or a
   dict of field -> string which becomes a JSON state (the form Laya's own presets
-  use, with the instructions naming the field in backticks).
-- serp_results: how many top SERP results the {serp_*} placeholders draw on.
-- instructions / criteria: the question text and one description per intent label.
-- model: which Laya checkpoint answers ("auto" lets the Router decide per query).
+  use, with the instructions naming the field in backticks). The text goes where the
+  task's placeholder is, e.g. {query} for search intent or {message} for support routing.
+- serp_results: how many top SERP results the {serp_*} placeholders draw on (search intent only).
+- instructions / criteria: the question text and one description per label.
+- model: which Laya checkpoint answers ("auto" lets the Router decide per input).
 - label_bias: per-label offsets added to the log-probabilities before the argmax.
   Fitted on the dev set by the Karpathy loop, never written by the LLM.
 
-The labels themselves are fixed.
+The labels themselves are fixed by the task.
 """
 
 import json
@@ -24,32 +25,15 @@ import numpy as np
 
 from app import serp
 from app.config import CHECKPOINTS_DIR, LAYA_DEVICE
-from app.tasks.intent.labels import SearchIntent
+from app.tasks.registry import DEFAULT_TASK_ID, Task
 
-QUESTION_ID = "intent"
+QUESTION_ID = "answer"
 BASELINE_VERSION = "v1_baseline"
-LABELS = SearchIntent.all_labels()
 
 LAYA_MODELS = ["auto", "english", "multilingual", "typed-decisions"]
 SERP_PLACEHOLDERS = ["{serp_sites}", "{serp_titles}", "{serp_snippets}"]
 DEFAULT_SERP_RESULTS = 4
 MAX_STATE_FIELDS = 6
-
-# Laya silently keeps only the first 48 tokens of each option description, and the
-# whole question (instructions + options) must fit its 192-token head budget.
-MAX_CRITERION_WORDS = 35
-MAX_INSTRUCTION_WORDS = 60
-
-DEFAULT_CONFIG: Dict[str, Any] = {
-    "state_template": "{query}",
-    "instructions": "Classify the search query intent based on what the user is trying to accomplish.",
-    "criteria": {
-        SearchIntent.INFORMATIONAL.value: "User seeks information, education, or knowledge (how to, what is, why, explain, tutorial, guide)",
-        SearchIntent.NAVIGATIONAL.value: "User seeks to reach a specific website or resource (login, sign in, account, official site, brand name)",
-        SearchIntent.COMMERCIAL.value: "User researches products/services before purchasing (best, top, review, comparison, vs, alternative)",
-        SearchIntent.TRANSACTIONAL.value: "User intends to complete a transaction (buy, purchase, order, download, book, subscribe, price, deal)",
-    },
-}
 
 _router = None
 _router_lock = threading.Lock()
@@ -74,15 +58,17 @@ def uses_serp(config: Dict[str, Any]) -> bool:
     return any(p in text for text in _template_strings(config["state_template"]) for p in SERP_PLACEHOLDERS)
 
 
-def validate_config(config: Dict[str, Any], allow_serp: bool = True) -> Tuple[Dict[str, Any], List[str]]:
-    """Check a prompt config and return (normalised config, warnings).
+def validate_config(config: Dict[str, Any], task: Task, allow_serp: bool = True) -> Tuple[Dict[str, Any], List[str]]:
+    """Check a prompt config against a task and return (normalised config, warnings).
 
     Raises ValueError when the config cannot be used at all.
     """
     if not isinstance(config, dict):
         raise ValueError("config must be a JSON object")
+    labels = task.labels
+    allow_serp = allow_serp and task.supports_serp
 
-    template = config.get("state_template", DEFAULT_CONFIG["state_template"])
+    template = config.get("state_template", task.default_config["state_template"])
     if isinstance(template, dict):
         if not 1 <= len(template) <= MAX_STATE_FIELDS:
             raise ValueError(f"state_template must have between 1 and {MAX_STATE_FIELDS} fields")
@@ -94,8 +80,8 @@ def validate_config(config: Dict[str, Any], allow_serp: bool = True) -> Tuple[Di
     elif not isinstance(template, str):
         raise ValueError("state_template must be a string or an object of field -> string")
     strings = _template_strings(template)
-    if sum(text.count("{query}") for text in strings) != 1:
-        raise ValueError("state_template must contain {query} exactly once")
+    if sum(text.count(task.placeholder) for text in strings) != 1:
+        raise ValueError(f"state_template must contain {task.placeholder} exactly once")
     if not allow_serp and any(p in text for text in strings for p in SERP_PLACEHOLDERS):
         raise ValueError("SERP placeholders are not enabled for this run")
 
@@ -104,24 +90,24 @@ def validate_config(config: Dict[str, Any], allow_serp: bool = True) -> Tuple[Di
         raise ValueError("instructions must be a non-empty string")
 
     criteria = config.get("criteria")
-    if not isinstance(criteria, dict) or set(criteria) != set(LABELS):
-        raise ValueError(f"criteria must have exactly these keys: {LABELS}")
-    for label in LABELS:
+    if not isinstance(criteria, dict) or set(criteria) != set(labels):
+        raise ValueError(f"criteria must have exactly these keys: {labels}")
+    for label in labels:
         if not isinstance(criteria[label], str) or not criteria[label].strip():
             raise ValueError(f"criteria['{label}'] must be a non-empty string")
 
     warnings = []
-    if len(instructions.split()) > MAX_INSTRUCTION_WORDS:
-        warnings.append(f"instructions are over {MAX_INSTRUCTION_WORDS} words and may be truncated")
-    for label in LABELS:
-        if len(criteria[label].split()) > MAX_CRITERION_WORDS:
-            warnings.append(f"criteria['{label}'] is over {MAX_CRITERION_WORDS} words; Laya ignores the tail")
+    if len(instructions.split()) > task.max_instruction_words:
+        warnings.append(f"instructions are over {task.max_instruction_words} words and may be truncated")
+    for label in labels:
+        if len(criteria[label].split()) > task.max_criterion_words:
+            warnings.append(f"criteria['{label}'] is over {task.max_criterion_words} words; Laya ignores the tail")
 
     normalised: Dict[str, Any] = {
         "state_template": template,
         "instructions": instructions.strip(),
         # Fixed label order: option order is part of what the model sees.
-        "criteria": {label: criteria[label].strip() for label in LABELS},
+        "criteria": {label: criteria[label].strip() for label in labels},
     }
     if any(p in text for text in strings for p in SERP_PLACEHOLDERS):
         results = config.get("serp_results", DEFAULT_SERP_RESULTS)
@@ -135,93 +121,97 @@ def validate_config(config: Dict[str, Any], allow_serp: bool = True) -> Tuple[Di
     return normalised, warnings
 
 
-def build_questions(config: Dict[str, Any]) -> Dict[str, Any]:
+def build_questions(config: Dict[str, Any], task: Task) -> Dict[str, Any]:
     """Turn a prompt config into the `questions` dict Router.predict expects."""
+    criteria = dict(config["criteria"])
+    if task.question_type == "noul":
+        # Laya's yes/no question takes its two descriptions under "false" and "true".
+        no, yes = task.labels
+        criteria = {"false": criteria[no], "true": criteria[yes]}
     return {
         QUESTION_ID: {
-            "type": "choice",
+            "type": task.question_type,
             "instructions": config["instructions"],
-            "criteria": dict(config["criteria"]),
+            "criteria": criteria,
         }
     }
 
 
-def render_state(config: Dict[str, Any], query: str) -> Union[str, Dict[str, str]]:
-    """Fill the state template for one query."""
-    values = {"{query}": query}
+def render_state(config: Dict[str, Any], task: Task, text: str) -> Union[str, Dict[str, str]]:
+    """Fill the state template for one input."""
+    values = {task.placeholder: text[: task.max_input_chars]}
     if uses_serp(config):
-        results = serp.lookup(query)[: config.get("serp_results", DEFAULT_SERP_RESULTS)]
+        results = serp.lookup(text)[: config.get("serp_results", DEFAULT_SERP_RESULTS)]
         values["{serp_sites}"] = ", ".join(r["site"] for r in results)
         values["{serp_titles}"] = " | ".join(r["title"] for r in results)
         values["{serp_snippets}"] = " | ".join(r["snippet"] for r in results)
 
-    def fill(text: str) -> str:
+    def fill(template_text: str) -> str:
         for placeholder, value in values.items():
-            text = text.replace(placeholder, value)
-        return text
+            template_text = template_text.replace(placeholder, value)
+        return template_text
 
-    template = config.get("state_template", DEFAULT_CONFIG["state_template"])
+    template = config.get("state_template", task.default_config["state_template"])
     if isinstance(template, dict):
-        return {field: fill(text) for field, text in template.items()}
+        return {field: fill(value) for field, value in template.items()}
     return fill(template)
 
 
-def predict_proba(queries: List[str], config: Dict[str, Any], batch_size: int = 32) -> np.ndarray:
-    """Laya's probability for each label (columns in LABELS order), one row per query."""
-    questions = build_questions(config)
+def _answer_probabilities(answer: Dict[str, Any], task: Task) -> List[float]:
+    """One probability per task label from a Laya answer."""
+    if task.question_type == "noul":
+        yes = float(answer["noul"])
+        return [1.0 - yes, yes]
+    return [answer["probabilities"][label] for label in task.labels]
+
+
+def predict_proba(texts: List[str], config: Dict[str, Any], task: Task, batch_size: int = 32) -> np.ndarray:
+    """Laya's probability for each label (columns in task.labels order), one row per input."""
+    questions = build_questions(config, task)
     model = config.get("model", "auto")
     requests = []
-    for query in queries:
-        request = {"state": render_state(config, query), "questions": questions}
+    for text in texts:
+        request = {"state": render_state(config, task, text), "questions": questions}
         if model != "auto":
             request["model"] = model
         requests.append(request)
     results = get_router().predict_batch(requests, batch_size=batch_size, sort_by_length=True)
-    return np.array([
-        [result["answers"][QUESTION_ID]["probabilities"][label] for label in LABELS]
-        for result in results
-    ], dtype=float)
+    return np.array(
+        [_answer_probabilities(result["answers"][QUESTION_ID], task) for result in results], dtype=float
+    ).reshape(len(texts), len(task.labels))
 
 
-def apply_label_bias(proba: np.ndarray, label_bias: Optional[Dict[str, float]]) -> np.ndarray:
+def apply_label_bias(proba: np.ndarray, label_bias: Optional[Dict[str, float]], labels: List[str]) -> np.ndarray:
     """Shift log-probabilities by the per-label bias and renormalise."""
     if not label_bias:
         return proba
-    logits = np.log(proba + 1e-9) + np.array([label_bias.get(label, 0.0) for label in LABELS])
+    logits = np.log(proba + 1e-9) + np.array([label_bias.get(label, 0.0) for label in labels])
     shifted = np.exp(logits - logits.max(axis=1, keepdims=True))
     return shifted / shifted.sum(axis=1, keepdims=True)
 
 
 def predict_batch(
-    queries: List[str],
-    config: Optional[Dict[str, Any]] = None,
+    texts: List[str],
+    config: Dict[str, Any],
+    task: Task,
     batch_size: int = 32,
 ) -> List[Dict[str, Any]]:
-    """Classify many queries with one prompt config.
+    """Classify many inputs with one prompt config.
 
-    Returns one {"intent", "confidence", "probabilities"} dict per query, in order.
+    Returns one {"label", "confidence", "probabilities"} dict per input, in order.
     """
-    config = config or DEFAULT_CONFIG
-    proba = apply_label_bias(predict_proba(queries, config, batch_size), config.get("label_bias"))
+    labels = task.labels
+    proba = apply_label_bias(predict_proba(texts, config, task, batch_size), config.get("label_bias"), labels)
 
     predictions = []
     for row in proba:
         choice = int(row.argmax())
         predictions.append({
-            "intent": LABELS[choice],
+            "label": labels[choice],
             "confidence": round(float(row[choice]), 4),
-            "probabilities": {label: round(float(p), 4) for label, p in zip(LABELS, row)},
+            "probabilities": {label: round(float(p), 4) for label, p in zip(labels, row)},
         })
     return predictions
-
-
-def classify_with_laya(
-    query: str,
-    config: Optional[Dict[str, Any]] = None,
-) -> Tuple[SearchIntent, float]:
-    """Classify one query. Returns (predicted_intent, confidence)."""
-    prediction = predict_batch([query], config)[0]
-    return SearchIntent(prediction["intent"]), prediction["confidence"]
 
 
 def guess_language(query: str) -> str:
@@ -253,15 +243,20 @@ def save_checkpoint(version: str, payload: Dict[str, Any]) -> None:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
-def load_version_config(version: Optional[str]) -> Dict[str, Any]:
-    """Return the prompt config saved under a version name.
+def load_version_config(version: Optional[str], task: Task) -> Dict[str, Any]:
+    """Return the prompt config saved under a version name for this task.
 
-    Raises ValueError for a version that is neither the baseline nor a saved checkpoint.
+    Raises ValueError for a version that is neither the baseline nor a saved checkpoint of the task.
     """
     if not version or version == BASELINE_VERSION:
-        return DEFAULT_CONFIG
+        return task.default_config
     path = checkpoint_path(version)
     if not path.exists():
         raise ValueError(f"No saved model version named '{version}'")
     with open(path, encoding="utf-8") as f:
-        return json.load(f)["config"]
+        checkpoint = json.load(f)
+    # Checkpoints saved before there were several examples have no task and belong to the default one.
+    saved_for = checkpoint.get("task") or DEFAULT_TASK_ID
+    if saved_for != task.id:
+        raise ValueError(f"Model version '{version}' was saved for the example '{saved_for}', not '{task.id}'")
+    return checkpoint["config"]

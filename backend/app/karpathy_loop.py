@@ -1,4 +1,4 @@
-"""Karpathy-style autoresearch loop over Laya's prompt.
+"""Karpathy-style autoresearch loop over Laya's prompt, for any example in app.tasks.registry.
 
 Same shape as https://github.com/karpathy/autoresearch, but the thing being
 edited is the Laya prompt config (state template, instructions, label
@@ -16,11 +16,11 @@ Three things keep the loop honest on a small, imbalanced dataset:
   probabilities separate the labels and not by which label it happens to favour.
   The bias is scored cross-fitted (fitted on one half, scored on the other) and
   is only used when it beats the plain argmax by more than noise.
-- A candidate replaces the best only when a paired bootstrap over the dev queries
+- A candidate replaces the best only when a paired bootstrap over the dev examples
   says it is better with KEEP_CONFIDENCE probability.
 
-Only golden queries in the evaluation language (EVAL_LANGUAGE, English by default)
-take part. The LLM only ever sees dev examples. Held-out queries (EVAL_HOLDOUT_RATIO of all
+For a task with a language (search intent: EVAL_LANGUAGE, English by default) only golden
+rows in that language take part. The LLM only ever sees dev examples. Held-out examples (EVAL_HOLDOUT_RATIO of all
 golden data plus whatever the dev sample did not use) are scored once at the end
 for the baseline and the best config. Every run writes its state, per-iteration
 checkpoints and prompts under autoresearch/runs/<run_id>/, and appends one line
@@ -35,33 +35,20 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
-
 from app import llm, serp
 from app.config import EVAL_HOLDOUT_RATIO, RESULTS_TSV, RUNS_DIR
 from app.database import ExperimentRun, SessionLocal
-from app.laya_inference import (
-    LABELS,
-    MAX_CRITERION_WORDS,
-    MAX_INSTRUCTION_WORDS,
-    apply_label_bias,
-    predict_proba,
-    validate_config,
-)
+from app.laya_inference import validate_config
+from app.scoring import KEEP_CONFIDENCE, METRICS, evaluate, gold_array, pred_array, prob_better, summarise
+from app.tasks.registry import DEFAULT_TASK_ID, TASKS, Task
 
-METRICS = {
-    "balanced": "mean of accuracy and macro-F1",
-    "accuracy": "accuracy",
-    "macro_f1": "macro-F1",
-}
-KEEP_CONFIDENCE = 0.8
-BOOTSTRAP_SAMPLES = 1000
 MAX_HOLDOUT_SIZE = 500
 MAX_CONSECUTIVE_CRASHES = 3
 ERRORS_SHOWN = 40
 GOLD_SHOWN_PER_LABEL = 8
 HISTORY_SHOWN = 15
-BIAS_GRID = sorted(np.round(np.linspace(-2.0, 2.0, 41), 2), key=abs)
+# Inputs are shown to the LLM cut to this many characters, so long emails and comments do not swamp the prompt.
+EXAMPLE_CHARS = 240
 
 
 def build_system_prompt(metric: str, calibrate: bool, use_serp: bool) -> str:
@@ -117,56 +104,7 @@ Reply with a single JSON object and nothing else:
 }}"""
 
 
-# ---------------------------------------------------------------- scoring
-
-def _label_scores(y: np.ndarray, pred: np.ndarray) -> Tuple[float, float, np.ndarray]:
-    """(accuracy, macro-F1 over labels present in y, confusion[actual][predicted])."""
-    k = len(LABELS)
-    confusion = np.bincount(y * k + pred, minlength=k * k).reshape(k, k)
-    hits = np.diag(confusion)
-    support, predicted = confusion.sum(axis=1), confusion.sum(axis=0)
-    f1 = 2 * hits / np.maximum(support + predicted, 1)
-    return hits.sum() / len(y), float(f1[support > 0].mean()), confusion
-
-
-def objective(y: np.ndarray, pred: np.ndarray, metric: str) -> float:
-    accuracy, macro_f1, _ = _label_scores(y, pred)
-    if metric == "accuracy":
-        return float(accuracy)
-    if metric == "macro_f1":
-        return macro_f1
-    return float((accuracy + macro_f1) / 2)
-
-
-def fit_label_bias(logp: np.ndarray, y: np.ndarray, metric: str) -> np.ndarray:
-    """Per-label offsets on the log-probabilities that maximise the objective (coordinate ascent)."""
-    bias = np.zeros(len(LABELS))
-    best = objective(y, logp.argmax(axis=1), metric)
-    for _ in range(3):
-        moved = False
-        for k in range(len(LABELS)):
-            # Smallest offsets first, and only strict gains move: ties keep the bias small.
-            for value in BIAS_GRID:
-                trial = bias.copy()
-                trial[k] = value
-                score = objective(y, (logp + trial).argmax(axis=1), metric)
-                if score > best + 1e-9:
-                    best, bias, moved = score, trial, True
-        if not moved:
-            break
-    return bias
-
-
-def prob_better(y: np.ndarray, pred_new: np.ndarray, pred_old: np.ndarray, metric: str, seed: int) -> float:
-    """Paired bootstrap: probability that pred_new scores above pred_old on a resampled dev set."""
-    rng = np.random.default_rng(seed)
-    wins = 0.0
-    for _ in range(BOOTSTRAP_SAMPLES):
-        idx = rng.integers(0, len(y), len(y))
-        new, old = objective(y[idx], pred_new[idx], metric), objective(y[idx], pred_old[idx], metric)
-        wins += 1.0 if new > old else 0.5 if new == old else 0.0
-    return wins / BOOTSTRAP_SAMPLES
-
+# ---------------------------------------------------------------- data
 
 def split_examples(
     examples: List[Dict[str, str]], sample_size: int, seed: int
@@ -182,103 +120,6 @@ def split_examples(
     reserved, rest = shuffled[:reserved_size], shuffled[reserved_size:]
     dev, unused = rest[:sample_size], rest[sample_size:]
     return dev, (reserved + unused)[:MAX_HOLDOUT_SIZE]
-
-
-def evaluate(
-    config: Dict[str, Any],
-    examples: List[Dict[str, str]],
-    metric: str,
-    fit_bias: bool,
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Run Laya with a prompt config over labelled examples and score it.
-
-    With fit_bias, a label bias is fitted on these examples and scored cross-fitted (each
-    half scored with the bias fitted on the other half). If that beats the plain argmax by
-    more than noise, the returned config carries the bias fitted on all the examples;
-    otherwise it carries none. Without fit_bias, the config's own label_bias (if any) is
-    applied as is.
-
-    Returns (config to keep, metrics).
-    """
-    y = np.array([LABELS.index(e["intent"]) for e in examples])
-    proba = predict_proba([e["query"] for e in examples], config)
-    raw_pred = proba.argmax(axis=1)
-
-    if fit_bias:
-        logp = np.log(proba + 1e-9)
-        pred = np.empty(len(y), dtype=int)
-        fold = np.arange(len(y)) % 2
-        for held in (0, 1):
-            bias = fit_label_bias(logp[fold != held], y[fold != held], metric)
-            pred[fold == held] = (logp[fold == held] + bias).argmax(axis=1)
-        # A bias has to earn its place the same way a prompt does. When the model is not
-        # skewed towards a label, fitting one only adds noise, so the plain argmax stands.
-        helps = (objective(y, pred, metric) > objective(y, raw_pred, metric)
-                 and prob_better(y, pred, raw_pred, metric, seed=0) >= KEEP_CONFIDENCE)
-        config = {k: v for k, v in config.items() if k != "label_bias"}
-        if helps:
-            full_bias = fit_label_bias(logp, y, metric)
-            config["label_bias"] = {label: float(b) for label, b in zip(LABELS, full_bias)}
-            proba = apply_label_bias(proba, config["label_bias"])
-        else:
-            pred = raw_pred
-    else:
-        proba = apply_label_bias(proba, config.get("label_bias"))
-        pred = proba.argmax(axis=1)
-
-    accuracy, macro_f1, confusion = _label_scores(y, pred)
-    raw_accuracy, raw_macro_f1, _ = _label_scores(y, raw_pred)
-    support, predicted = confusion.sum(axis=1), confusion.sum(axis=0)
-    per_class = {}
-    for k, label in enumerate(LABELS):
-        hit = int(confusion[k, k])
-        precision = hit / predicted[k] if predicted[k] else 0.0
-        recall = hit / support[k] if support[k] else 0.0
-        per_class[label] = {
-            "precision": round(precision, 3),
-            "recall": round(recall, 3),
-            "f1": round(2 * hit / (support[k] + predicted[k]) if support[k] + predicted[k] else 0.0, 3),
-            "support": int(support[k]),
-        }
-    cases = [
-        {
-            "query": example["query"],
-            "actual": example["intent"],
-            "predicted": LABELS[p],
-            "confidence": round(float(proba[i, p]), 4),
-            "correct": bool(p == y[i]),
-        }
-        for i, (example, p) in enumerate(zip(examples, pred))
-    ]
-    metrics = {
-        "score": round(objective(y, pred, metric), 4),
-        "accuracy": round(float(accuracy), 4),
-        "macro_f1": round(macro_f1, 4),
-        # Plain argmax with no label bias, to show what calibration contributes.
-        "raw_accuracy": round(float(raw_accuracy), 4),
-        "raw_macro_f1": round(raw_macro_f1, 4),
-        "correct": int(np.diag(confusion).sum()),
-        "total": len(cases),
-        "predicted_counts": {label: int(n) for label, n in zip(LABELS, predicted)},
-        "gold_counts": {label: int(n) for label, n in zip(LABELS, support)},
-        "per_class": per_class,
-        "confusion": {a: {p: int(confusion[i, j]) for j, p in enumerate(LABELS)} for i, a in enumerate(LABELS)},
-        "cases": cases,
-    }
-    return config, metrics
-
-
-def _pred_array(metrics: Dict[str, Any]) -> np.ndarray:
-    return np.array([LABELS.index(c["predicted"]) for c in metrics["cases"]])
-
-
-def _gold_array(metrics: Dict[str, Any]) -> np.ndarray:
-    return np.array([LABELS.index(c["actual"]) for c in metrics["cases"]])
-
-
-def summarise(metrics: Dict[str, Any]) -> Dict[str, Any]:
-    """Metrics without the per-case list (for run state and API responses)."""
-    return {k: v for k, v in metrics.items() if k != "cases"}
 
 
 # ---------------------------------------------------------------- prompt
