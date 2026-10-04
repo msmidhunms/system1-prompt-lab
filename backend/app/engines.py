@@ -14,6 +14,7 @@ Only one of these models is kept in memory at a time, so the set fits a small ma
 
 import json
 import threading
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
@@ -119,6 +120,13 @@ MAX_TOKENS = 512
 
 _loaded: Dict[str, Any] = {"id": None}
 _lock = threading.Lock()
+# Per thread: the time spent waiting for the lock and loading a model, so a timed run can leave it out.
+_overhead = threading.local()
+
+
+def overhead_seconds() -> float:
+    """How long the calling thread has spent, in total, waiting for a model to be free and loaded."""
+    return getattr(_overhead, "seconds", 0.0)
 
 
 def get_engine(engine_id: Optional[str]) -> Dict[str, Any]:
@@ -297,8 +305,10 @@ def predict_proba(
     rows = []
     for start in range(0, len(texts), chunk):
         # The lock is taken per chunk, so an evaluation on another model can interleave (at the cost of a reload).
+        waiting = time.perf_counter()
         with _lock:
             loaded = _load(engine_id)
+            _overhead.seconds = overhead_seconds() + time.perf_counter() - waiting
             if family in ("gliclass", "verdict"):
                 part = np.concatenate([
                     _PREDICT[family](loaded, texts[i:i + BATCH], instructions, descriptions)
