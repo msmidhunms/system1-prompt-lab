@@ -1,8 +1,17 @@
 from fastapi.testclient import TestClient
 
 from app.main import app
+from conftest import wait_for_background_work
 
 client = TestClient(app)
+
+
+def evaluate(**body):
+    """Start an evaluation, wait for it and return its full result."""
+    started = client.post("/api/evaluate", json=body).json()
+    assert started["status"] == "running"
+    wait_for_background_work()
+    return client.get(f"/api/evaluations/{started['eval_id']}").json()
 
 
 def test_tasks_lists_every_example_with_its_labels():
@@ -58,12 +67,50 @@ def test_evaluations_are_saved_per_example(router):
         client.post("/api/golden-data", json={"task": "news_topic", "text": text, "label": label})
     assert client.post("/api/evaluate", json={"task": "news_topic", "sample_size": 5}).status_code == 400
 
-    result = client.post("/api/evaluate", json={"task": "news_topic", "sample_size": 10}).json()
+    result = evaluate(task="news_topic", sample_size=10)
+    assert result["status"] == "completed" and result["progress_done"] == result["progress_total"] == 3
     assert result["total_cases"] == 3 and result["error_count"] == 1
     assert result["confusion_matrix"]["sports"]["world"] == 1
 
     history = client.get("/api/evaluations", params={"task": "news_topic"}).json()
-    assert [h["eval_id"] for h in history] == [result["eval_id"]]
-    assert client.get(f"/api/evaluations/{result['eval_id']}").json() == result
+    assert [(h["eval_id"], h["status"], h["accuracy"]) for h in history] == [(result["eval_id"], "completed", result["accuracy"])]
     assert client.get("/api/evaluations", params={"task": "toxicity"}).json() == []
     assert client.post("/api/evaluate", json={"task": "toxicity"}).status_code == 400
+
+
+def test_a_failed_evaluation_is_recorded(router, monkeypatch):
+    client.post("/api/golden-data", json={"task": "news_topic", "text": "sports one", "label": "sports"})
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(router, "predict_batch", broken)
+    result = evaluate(task="news_topic", sample_size=10)
+    assert result["status"] == "failed" and result["error"] == "model unavailable" and result["accuracy"] is None
+
+
+def test_evaluations_left_running_are_marked_interrupted(db):
+    from app import evaluations
+    from app.database import EvaluationRun
+
+    db.add(EvaluationRun(id="stale", task_id="news_topic", model="laya", version="v1_baseline", sample_size=5,
+                         total_cases=5, accuracy=0.0, macro_f1=0.0, result={}, status="running"))
+    db.commit()
+    evaluations.mark_interrupted()
+    assert client.get("/api/evaluations/stale").json()["status"] == "interrupted"
+
+
+def test_import_runs_in_the_background_and_reports_status(monkeypatch):
+    from app.tasks import sources
+
+    monkeypatch.setitem(sources.LOADERS, "news_topic", lambda size, seed: [{"text": "a sports story", "label": "sports"}])
+    monkeypatch.setitem(sources.LOADERS, "toxicity", lambda size, seed: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(sources, "_import_state", {})
+
+    assert client.post("/api/setup/import", json={"tasks": ["news_topic", "toxicity"]}).json()["queued"] == ["news_topic", "toxicity"]
+    wait_for_background_work()
+    tasks = {t["id"]: t for t in client.get("/api/tasks").json()["tasks"]}
+    assert tasks["news_topic"]["golden_rows"] == 1 and tasks["news_topic"]["import_status"]["status"] == "done"
+    assert tasks["toxicity"]["import_status"] == {"status": "failed", "message": "offline"}
+    assert "test_db.json" in tasks["search_intent"]["setup_hint"]
+    assert client.get("/api/activity").json() == {"loop": None, "evaluations": [], "imports": []}
