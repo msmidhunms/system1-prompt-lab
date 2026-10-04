@@ -1,10 +1,10 @@
 # System-1 Model Experiments
 
-An experiment harness for Laya, a fast non-autoregressive "System 1" classifier. Each **example** is a classification task with a golden dataset. For any example you can try single inputs, edit the golden dataset, evaluate a prompt version, and run a Karpathy loop in which an LLM rewrites the prompt Laya is given and keeps only what scores better.
+An experiment harness for Laya, a fast non-autoregressive "System 1" classifier. Each **example** is a classification task with a golden dataset. For any example you can try single inputs, edit the golden dataset, manage prompt versions ("models"), evaluate them, and run the Prompt Optimizer, in which an LLM rewrites the prompt Laya is given and keeps only what scores better.
 
 ## Examples
 
-Pick the example in the header of the UI; every tab then works on that example. They are defined in `backend/app/tasks/registry.py`.
+Pick the example in the sidebar; every tab then works on that example. They are defined in `backend/app/tasks/registry.py`.
 
 | Example | Input | Labels | Golden data |
 |---|---|---|---|
@@ -30,12 +30,14 @@ python backend/scripts/import_dataset.py --task all
 python backend/scripts/import_dataset.py --task support_routing --rows 3000 --refresh
 ```
 
-The Golden Dataset tab has an **Import dataset** button that does the same for an example with no rows. An import never overwrites a row that is already in the golden dataset.
+In the app, **Set up data** in the sidebar lists every example with its status and downloads the missing public datasets with one button; an empty example's Dataset tab has the same button. An import never overwrites a row that is already in the golden dataset.
+
+Search intent is the exception: its data (`data/test_db.json`) is not in the repository and cannot be downloaded. Put the file in `data/` and run `python backend/scripts/import_dataset.py --task search_intent`. Without it the example still works with rows added by hand.
 
 ### Adding an example
 
 1. Add a `Task` to `backend/app/tasks/registry.py`: its state field, labels, default prompt and the paragraph the Karpathy loop is told about the task.
-2. Add a loader to `backend/app/tasks/sources.py` if the data is downloadable, or add rows by hand in the Golden Dataset tab.
+2. Add a loader to `backend/app/tasks/sources.py` if the data is downloadable, or add rows by hand in the Dataset tab.
 
 Nothing else is example-specific: inference, scoring, the loop, the API and the UI all read the registry.
 
@@ -51,12 +53,14 @@ backend/                  Python FastAPI + SQLite (backend/data.db)
                           model_versions, experiment_runs, app_settings
     tasks/
       registry.py         The examples
-      sources.py          Dataset loaders and the import
+      sources.py          Dataset loaders and the (background) import
       intent/             Search-intent label enum and schemas
-    laya_inference.py     Prompt configs, Laya calls, saved versions
+    laya_inference.py     Prompt configs and Laya calls
+    versions.py           Saved model versions: create, rename, delete, auto-save
     scoring.py            Accuracy, macro-F1, label-bias fit, paired bootstrap
+    evaluations.py        Evaluations as background jobs
     golden.py             Golden rows: list, add-or-update, edit
-    karpathy_loop.py      The autoresearch loop
+    karpathy_loop.py      The optimizer loop
     llm.py                The LLM that proposes prompts
     serp.py               Search-result context for search intent
   scripts/
@@ -69,25 +73,42 @@ backend/                  Python FastAPI + SQLite (backend/data.db)
 frontend/                 React + Vite + TypeScript
   src/
     api.ts                API client and shared types
-    TaskContext.tsx       The selected example
-    components/           TryIt, GoldenDataset, Evaluation, KarpathyLoop, LLMSettings
+    context.tsx           App state (examples, LLM settings, background activity) and routing
+    ui/                   Shared components (Button, Card, Menu, Dialog, ...)
+    styles/               Design tokens (light and dark) and base styles
+    components/           Playground, Dataset, Models, Evaluation, optimizer/, dialogs
 
 data/
   test_db.json            Search-intent queries with their search results (gitignored)
   tasks/                  Downloaded samples of the other examples (gitignored)
 
 autoresearch/
-  runs/<run_id>/          Everything a Karpathy loop run produced
-  checkpoints/            Saved prompt versions
+  runs/<run_id>/          Everything an optimizer run produced
+  checkpoints/            Saved model versions
   results.tsv             One line per experiment
 ```
 
-## The four tabs
+## The five tabs
 
-- **Try It**: classify one input with any saved version and mark the prediction right or wrong. Feedback that settles the label is written to the golden dataset.
-- **Golden Dataset**: browse, search, filter, edit and delete the example's labelled rows, and add new ones.
-- **Model Evaluation**: score a version on a seeded random sample of the golden dataset. Every evaluation is saved and listed under Past Evaluations.
-- **Karpathy Loop**: run the prompt autoresearch loop and open past runs.
+- **Playground**: classify one input with any model version and mark the prediction right or wrong. Feedback that settles the label is written to the golden dataset.
+- **Dataset**: browse, search, filter, edit and delete the example's labelled rows, and add new ones.
+- **Models**: the example's prompt versions. View a prompt, duplicate and edit it into a new version, rename, delete, or send it to Evaluation or the Playground.
+- **Evaluation**: score a version on a seeded random sample of the golden dataset. Every evaluation is saved and listed.
+- **Prompt Optimizer**: run the prompt autoresearch loop and open past runs.
+
+Evaluations, optimizer runs and dataset imports run on the server. You can switch tab or example, or reload the page, and find them where they were; the header shows what is running. The place in the app is kept in the URL (`#/support_routing/optimizer`).
+
+The LLM used by the optimizer is one setting for the whole app (**Settings** in the header), stored on the server.
+
+### Model versions
+
+A model version is a named prompt for one example: the state template, the instructions, one description per label, the Laya checkpoint and an optional label bias. Versions come from three places:
+
+- **Auto-saved**: each optimizer run saves its best prompt as one version (`<example>_<MMDD-HHMM>`) the moment a round is kept, and overwrites it when a later round is better. It is there even if the run is stopped or fails, and can be renamed at any time.
+- **Optimizer**: any round of a run, kept or discarded, saved by hand from the round's menu.
+- **Manual**: **Duplicate and edit** on any version opens an editor; saving creates a new version and leaves the original untouched.
+
+Renaming a version also renames it in saved evaluations and in versions based on it.
 
 ### Adding a golden row
 
@@ -145,7 +166,7 @@ Judge from the query wording first and the top results second. One primary inten
 
 ## Key Concepts
 
-### Karpathy Autoresearch Loop
+### The Prompt Optimizer (Karpathy autoresearch loop)
 Modelled on [karpathy/autoresearch](https://github.com/karpathy/autoresearch), but the thing being edited is the **prompt Laya is given**, not code. It works the same way for every example. A prompt config (`backend/app/laya_inference.py`) has these parts the LLM may rewrite:
 
 - `state_template`: how the input is rendered into the state passed to `Router.predict`. A string, or an object of field → string that becomes a JSON state (the form Laya's presets use, with the instructions naming the field in backticks). The input goes where the example's placeholder is: `{query}` for search intent, `{message}` for support routing, and so on. For search intent with SERP context enabled it may also use `{serp_sites}`, `{serp_titles}` and `{serp_snippets}`, drawn from the top `serp_results` results in `data/test_db.json`.
@@ -159,7 +180,7 @@ Each round (`backend/app/karpathy_loop.py`):
 2. Laya is run with that config on the dev set.
 3. The config is scored by the run's objective (`backend/app/scoring.py`). The default is the mean of accuracy and macro-F1, because on an imbalanced dataset plain accuracy rewards putting every input in the majority label.
 4. With calibration on, a per-label bias is fitted on the dev set for every config, so a prompt that skews towards one label is judged by how well it separates the labels rather than by which label it favours. The bias is scored cross-fitted (fitted on one half, scored on the other) and is only used when it beats the plain argmax by more than noise.
-5. **Keep** only if the score is higher and a paired bootstrap over the dev queries gives at least 0.8 probability that the gain is real. Otherwise **discard**. An unusable LLM reply is a **crash**.
+5. **Keep** only if the score is higher and a paired bootstrap over the dev queries gives at least 0.8 probability that the gain is real. Otherwise **discard**. An unusable LLM reply or a failed LLM call is a failed round; three in a row end the proposing early, and the run finishes as `failed` with what it found still scored and saved.
 6. Held-out queries (`EVAL_HOLDOUT_RATIO` of the golden data plus whatever the dev sample did not use, never shown to the LLM) are scored once at the end for the baseline and the best config.
 
 Laya keeps only the first 48 tokens of each label description, and the instructions and all descriptions share about 190 tokens, so the LLM is told to keep them short (shorter still for six-label examples). Inputs longer than about 1,500 characters are cut before they reach Laya.
@@ -173,10 +194,10 @@ Every run writes to `autoresearch/runs/<run_id>/` (gitignored):
 - `iter_NNN_prompt.txt`: the exact prompt sent to the LLM.
 - `best_config.json`, `holdout_results.json`, `dev_set.json`, `holdout_set.json`.
 
-One line per experiment is also appended to `autoresearch/results.tsv`. Saving a run's best prompt from the UI writes `autoresearch/checkpoints/<name>.json`; that name can then be used as `version` in `/api/predict` and `/api/evaluate` for the same example, or as the starting point of its next run. Version names are unique across examples. A saved prompt that uses SERP placeholders only has that context for queries in `data/test_db.json`.
+One line per experiment is also appended to `autoresearch/results.tsv`. A saved version (the run's auto-saved best, or a round saved from the UI) is written to `autoresearch/checkpoints/<name>.json`; that name can then be used as `version` in `/api/predict` and `/api/evaluate` for the same example, or as the starting point of its next run. Version names are unique across examples. A saved prompt that uses SERP placeholders only has that context for queries in `data/test_db.json`.
 
 ### LLM Configuration
-The LLM is chosen on the Karpathy Loop page and stored in the local SQLite DB (`backend/app/llm.py`). Supported: Claude (Anthropic API), OpenAI, Ollama, Google Gemini, any OpenAI-compatible endpoint (OpenRouter, Groq, LM Studio, vLLM, ...), and the Claude Code and Codex CLIs (which use their own login, no API key). API keys can be entered in the UI or supplied through `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` in the backend environment.
+The LLM is chosen in **Settings** and stored in the local SQLite DB (`backend/app/llm.py`). Supported: Claude (Anthropic API), OpenAI, Ollama, Google Gemini, any OpenAI-compatible endpoint (OpenRouter, Groq, LM Studio, vLLM, ...), and the Claude Code and Codex CLIs (which use their own login, no API key). API keys can be entered in the UI or supplied through `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` in the backend environment.
 
 ## Quick Start
 
@@ -197,16 +218,7 @@ pip install -r requirements.txt
 
 ### Environment Configuration
 
-Create a `.env` file in the `backend/` directory:
-
-```env
-DEBUG=false
-TOP_N_FEEDBACK=5
-LAYA_MODEL_NAME=layalm/laya1
-LAYA_DEVICE=cpu
-EVAL_HOLDOUT_RATIO=0.1
-EVAL_LANGUAGE=en
-```
+Optional: copy `backend/.env.example` to `backend/.env` and adjust. Everything has a default, so the app runs without it. The Laya weights are downloaded from Hugging Face the first time a prediction is made.
 
 ### Run Backend
 
@@ -228,7 +240,11 @@ npm run dev
 
 The frontend will run on `http://localhost:5173`.
 
+The frontend talks to `http://localhost:8000/api`; set `VITE_API_URL` to point it elsewhere.
+
 ### Load the data
+
+A fresh clone has no golden data: the database and the datasets are not in the repository. Open the app and use **Set up data** in the sidebar, or:
 
 ```bash
 python backend/scripts/import_dataset.py --task all
@@ -240,21 +256,21 @@ A database created before the examples existed is upgraded once with `python bac
 
 ### Evaluate a version
 
-Model Evaluation tab, or:
+Evaluation tab, or:
 
 ```bash
 curl -X POST localhost:8000/api/evaluate -H 'Content-Type: application/json' \
-  -d '{"task": "support_routing", "version": "v1_baseline", "sample_size": 200}'
+  -d '{"task": "support_routing", "version": "v1_baseline", "sample_size": 200}'   # returns the id, status "running"
+curl localhost:8000/api/evaluations/<eval_id>                    # progress, then the result
 curl 'localhost:8000/api/evaluations?task=support_routing'      # past evaluations
 ```
 
-### Karpathy loop
+### Optimize a prompt
 
-1. Open the **Karpathy Loop** tab for the example.
-2. Pick the LLM provider and model, then **Save and test**.
-3. Set the dev set size, the number of rounds, the version to start from, the Laya checkpoint and the objective, then start the loop.
-4. Watch each round arrive as keep / discard / crash. Click a round to see the prompt it proposed.
-5. When the run ends, compare dev and holdout accuracy and save the best prompt as a named version.
+1. Choose the LLM once in **Settings** (provider, model, key), then **Save and test**.
+2. Open the example's **Prompt Optimizer** tab, set the rounds, the dev set size, the version to start from, the Laya checkpoint and the objective, and start the run.
+3. Watch each round arrive as kept / discarded / failed, with the score chart. Click a round to see the prompt it proposed.
+4. The best prompt is saved automatically; rename it, evaluate it, or save any other round from its menu.
 
 ```bash
 curl -X POST localhost:8000/api/karpathy-loop -H 'Content-Type: application/json' \
@@ -269,19 +285,22 @@ Every endpoint takes the example as `task` (query parameter on GET, body field o
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/tasks` | The examples, their labels and golden row counts |
-| `POST /api/tasks/{task}/import` | Import the example's dataset |
+| `POST /api/setup/import` | Download and import datasets in the background (`tasks`: the examples; empty means all that have no data) |
+| `GET /api/activity` | What is running: the optimizer run, evaluations, imports |
 | `POST /api/predict` | Classify one input |
 | `POST /api/feedback` | Record feedback; updates the golden dataset when it settles the label |
 | `GET /api/golden-data` | One page of golden rows (`page`, `page_size`, `q`, `label`, `source`) |
 | `GET /api/golden-data/stats` | Row counts by label, source and language |
 | `POST /api/golden-data` | Add a row, or update the row with the same input |
 | `PUT /api/golden-data/{id}`, `DELETE /api/golden-data/{id}` | Edit or delete a row |
-| `POST /api/evaluate` | Evaluate a version and save the result |
-| `GET /api/evaluations`, `GET /api/evaluations/{id}` | Past evaluations |
+| `POST /api/evaluate` | Start an evaluation in the background |
+| `GET /api/evaluations`, `GET /api/evaluations/{id}` | Evaluations with status and progress; the full result once completed |
 | `POST /api/karpathy-loop` | Start a loop |
 | `GET /api/karpathy-loop/runs`, `GET /api/karpathy-loop/runs/{id}` | Past and current runs |
 | `POST /api/karpathy-loop/runs/{id}/stop` | Stop after the current round |
-| `GET /api/models`, `POST /api/save-model` | Saved prompt versions |
+| `GET /api/models`, `POST /api/models` | List model versions; create one from a prompt config |
+| `PATCH /api/models/{name}`, `DELETE /api/models/{name}` | Rename or delete a version |
+| `POST /api/save-model` | Save a run's best prompt, or the prompt of one round (`iteration`), as a version |
 | `GET/PUT /api/llm/config`, `POST /api/llm/test`, `POST /api/llm/models` | LLM settings |
 
 ## Testing
@@ -291,7 +310,7 @@ cd backend
 pytest tests/ -v
 ```
 
-The tests use a throwaway database (`DB_PATH`) and a stub in place of the Laya model.
+The tests use a throwaway database and run folder (`DB_PATH`, `DATA_DIR`, `AUTORESEARCH_DIR`), a stub in place of the Laya model and a scripted LLM.
 
 ## License
 
