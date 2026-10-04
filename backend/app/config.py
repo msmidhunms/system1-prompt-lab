@@ -29,6 +29,7 @@ TOP_N_FEEDBACK = int(os.getenv("TOP_N_FEEDBACK", "5"))
 # Model settings
 LAYA_MODEL_NAME = os.getenv("LAYA_MODEL_NAME", "layalm/laya1")  # HuggingFace model name
 LAYA_DEVICE = os.getenv("LAYA_DEVICE", "cpu")  # or "cuda"
+ENGINE_DEVICE = os.getenv("ENGINE_DEVICE", "cpu")  # device for the other models: "cpu", "cuda", "mps" or "auto"
 
 # Database
 SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH}"
