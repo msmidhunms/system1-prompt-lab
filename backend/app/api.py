@@ -61,8 +61,14 @@ async def predict(
     if not query or not query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
-    # Get appropriate classifier based on version
-    if version == "v1_baseline":
+    # Use Laya-based classifier if model is 'laya'
+    if model == "laya":
+        try:
+            predicted_intent, confidence = classify_with_laya(query)
+        except Exception as e:
+            print(f"Laya classification failed: {e}, falling back to keyword-based")
+            predicted_intent, confidence = classify_intent(query)
+    elif version == "v1_baseline":
         predicted_intent, confidence = classify_intent(query)
     elif version.startswith("v2"):
         predicted_intent, confidence = classify_intent_v2(query)
