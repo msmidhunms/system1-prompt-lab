@@ -32,6 +32,9 @@ interface ExperimentResult {
   best_model_name: string
   iterations: LoopIteration[]
   improved: boolean
+  sample_size?: number
+  total_golden_data?: number
+  timestamp?: string
 }
 
 export default function KarpathyLoop() {
