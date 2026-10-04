@@ -1,19 +1,35 @@
 import { useState } from 'react'
 import './App.css'
+import SERPAnalysis from './components/SERPAnalysis'
+import KarpathyLoop from './components/KarpathyLoop'
+
+type Page = 'serp' | 'karpathy'
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [currentPage, setCurrentPage] = useState<Page>('serp')
 
   return (
     <div className="App">
       <header>
         <h1>System 1 Experiments</h1>
+        <nav className="nav-tabs">
+          <button
+            className={`nav-button ${currentPage === 'serp' ? 'active' : ''}`}
+            onClick={() => setCurrentPage('serp')}
+          >
+            SERP Analysis
+          </button>
+          <button
+            className={`nav-button ${currentPage === 'karpathy' ? 'active' : ''}`}
+            onClick={() => setCurrentPage('karpathy')}
+          >
+            Karpathy Loop
+          </button>
+        </nav>
       </header>
       <main>
-        <p>Welcome to the System 1 Experiments frontend</p>
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
+        {currentPage === 'serp' && <SERPAnalysis />}
+        {currentPage === 'karpathy' && <KarpathyLoop />}
       </main>
     </div>
   )
