@@ -129,8 +129,8 @@ _TASKS = [
             "criteria": {
                 "card": "the card itself: ordering, delivery, activation, PIN, lost or not working",
                 "card_payment": "a payment made with the card: declined, pending, charged twice, a fee or a refund",
-                "transfer": "sending or receiving a bank transfer",
-                "top_up": "adding money to the account",
+                "transfer": "sending money to someone or receiving money from someone",
+                "top_up": "adding money to the account by card, bank transfer, cash or cheque",
                 "cash_withdrawal": "taking cash out at an ATM",
                 "account": "identity checks, personal details, closing the account or exchanging currencies",
             },
@@ -140,8 +140,9 @@ _TASKS = [
             "The gold labels come from the Banking77 dataset, whose 77 fine-grained intents were grouped into these "
             "six by what the message is about: the physical or virtual card itself (card); something that happened to "
             "a payment made with the card, including refunds and unexpected charges on the statement (card_payment); "
-            "bank transfers in or out (transfer); adding money to the account (top_up); cash machines and cash "
-            "withdrawals (cash_withdrawal); identity verification, personal details, passcode, closing the account "
+            "sending money to another person or receiving money from one (transfer); getting money into the account "
+            "by any means, including by bank transfer and which cards can be used for it (top_up); cash machines and "
+            "cash withdrawals (cash_withdrawal); identity verification, personal details, passcode, closing the account "
             "and currency exchange (account)."
         ),
         source="mteb/banking77 on Hugging Face, 77 intents grouped into 6",
@@ -235,31 +236,31 @@ _TASKS = [
     ),
     Task(
         id="email_triage",
-        name="Email triage",
-        summary="Separate legitimate email from spam and phishing.",
+        name="Email spam filter",
+        summary="Decide whether an email is unsolicited spam or a scam.",
         input_field="body",
-        input_label="Email text",
+        input_label="Email (subject and body)",
         item="email",
         items="emails",
-        question_type="choice",
-        labels=["legitimate", "spam", "phishing"],
+        question_type="noul",
+        labels=["legitimate", "spam"],
         default_config={
             "state_template": _state("body"),
-            "instructions": "What kind of email is in `body`?",
+            "instructions": "Is the email in `body` unsolicited spam, bulk marketing or a scam?",
             "criteria": {
-                "legitimate": "a genuine personal or work email",
-                "spam": "unsolicited advertising or bulk marketing",
-                "phishing": "a scam that tries to steal money, credentials or personal data",
+                "legitimate": "a genuine personal, work or mailing-list email",
+                "spam": "unsolicited advertising, bulk marketing, a scam or phishing",
             },
         },
-        loop_task="triage of emails",
+        loop_task="spam filtering of emails (subject line followed by the body)",
         loop_conventions=(
-            "The gold labels come from two public datasets: legitimate is genuine work and mailing-list email, spam "
-            "is unsolicited advertising (pills, software, stocks, adult sites), and phishing is email that tries to "
-            "trick the reader into giving money, credentials or personal data. The emails are lower-cased and "
-            "tokenised, and long ones are cut off."
+            "The gold labels come from seven public email corpora (Enron, SpamAssassin, CEAS-08, Ling-Spam and "
+            "TREC 2005-2007), each of which has both labels: spam is unsolicited advertising, bulk marketing, scams "
+            "and phishing; legitimate is genuine work email, personal email and mailing-list traffic, including "
+            "newsletters people subscribed to and technical discussion lists. Some corpora are lower-cased and "
+            "tokenised, and long emails are cut off."
         ),
-        source="SetFit/enron_spam and zefang-liu/phishing-email-dataset on Hugging Face",
+        source="puyang2025/seven-phishing-email-datasets on Hugging Face (seven corpora)",
     ),
     Task(
         id="toxicity",

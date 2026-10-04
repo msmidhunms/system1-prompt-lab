@@ -78,7 +78,7 @@ BANKING77_GROUPS = {
         "card_delivery_estimate", "card_linking", "card_not_working", "change_pin", "compromised_card",
         "contactless_not_working", "disposable_card_limits", "get_disposable_virtual_card", "get_physical_card",
         "getting_spare_card", "getting_virtual_card", "lost_or_stolen_card", "order_physical_card", "pin_blocked",
-        "supported_cards_and_currencies", "virtual_card_not_working", "visa_or_mastercard",
+        "virtual_card_not_working", "visa_or_mastercard",
     ],
     "card_payment": [
         "Refund_not_showing_up", "card_payment_fee_charged", "card_payment_not_recognised",
@@ -87,14 +87,15 @@ BANKING77_GROUPS = {
         "transaction_charged_twice",
     ],
     "transfer": [
-        "balance_not_updated_after_bank_transfer", "beneficiary_not_allowed", "cancel_transfer", "declined_transfer",
-        "failed_transfer", "pending_transfer", "receiving_money", "transfer_fee_charged", "transfer_into_account",
-        "transfer_not_received_by_recipient", "transfer_timing",
+        "beneficiary_not_allowed", "cancel_transfer", "declined_transfer", "failed_transfer", "pending_transfer",
+        "receiving_money", "transfer_fee_charged", "transfer_not_received_by_recipient", "transfer_timing",
     ],
+    # Every way of getting money into the account, including by bank transfer and which cards can be used for it.
     "top_up": [
-        "automatic_top_up", "balance_not_updated_after_cheque_or_cash_deposit", "pending_top_up",
+        "automatic_top_up", "balance_not_updated_after_bank_transfer",
+        "balance_not_updated_after_cheque_or_cash_deposit", "pending_top_up", "supported_cards_and_currencies",
         "top_up_by_bank_transfer_charge", "top_up_by_card_charge", "top_up_by_cash_or_cheque", "top_up_failed",
-        "top_up_limits", "top_up_reverted", "topping_up_by_card", "verify_top_up",
+        "top_up_limits", "top_up_reverted", "topping_up_by_card", "transfer_into_account", "verify_top_up",
     ],
     "cash_withdrawal": [
         "atm_support", "card_swallowed", "cash_withdrawal_charge", "cash_withdrawal_not_recognised",
@@ -166,28 +167,26 @@ def _load_toxicity(size: int, seed: int) -> List[Row]:
 # ---------------------------------------------------------------- assembled examples
 
 def _load_email_triage(size: int, seed: int) -> List[Row]:
-    enron = _table("SetFit/enron_spam", "default/train/0000.parquet", ["text", "label_text"])
-    phishing = _table("zefang-liu/phishing-email-dataset", "default/train/0000.parquet", ["Email Text", "Email Type"])
+    """Spam or not, from seven email corpora (Enron, SpamAssassin, CEAS-08, Ling, TREC-05/06/07).
 
-    def rows(source_rows, text_key, label_key, value, label, source) -> List[Row]:
-        return [{"text": row[text_key], "label": label, "meta": {"source": source}}
-                for row in source_rows if row[label_key] == value and row[text_key]]
-
-    share = size // 3
-    # Legitimate mail is drawn from both datasets, so the source alone does not give the label away.
-    legitimate = (
-        _sample(rows(enron, "text", "label_text", "ham", "legitimate", "enron_spam"), share - share // 2, seed)
-        + _sample(rows(phishing, "Email Text", "Email Type", "Safe Email", "legitimate", "phishing-email-dataset"),
-                  share // 2, seed)
+    Each corpus contributes both labels, so which corpus an email is from does not give its label away.
+    """
+    rows = _table("puyang2025/seven-phishing-email-datasets", "default/test/0000.parquet",
+                  ["text", "subject", "label", "dataset_name"])
+    return _sample(
+        [{"text": f"Subject: {(row['subject'] or '').strip()}\n\n{row['text'].strip()}",
+          "label": "spam" if row["label"] == 1 else "legitimate",
+          "meta": {"corpus": row["dataset_name"]}}
+         for row in rows if row["text"] and row["text"].strip()],
+        size, seed,
     )
-    return _quotas({
-        "legitimate": legitimate,
-        "spam": rows(enron, "text", "label_text", "spam", "spam", "enron_spam"),
-        "phishing": rows(phishing, "Email Text", "Email Type", "Phishing Email", "phishing", "phishing-email-dataset"),
-    }, size, seed)
 
 
 _SPEAKER = re.compile(r"^User [12]:\s*")
+# Dolly's creative_writing category also holds plain questions; these words mark an actual writing request.
+_WRITING = re.compile(
+    r"\b(write|compose|draft|story|poem|haiku|limerick|essay|letter|e-?mail|paragraph|blog|speech|tribute|song|"
+    r"script|slogan|describe|imagine|argue)\b", re.IGNORECASE)
 
 
 def _load_request_domain(size: int, seed: int) -> List[Row]:
@@ -211,7 +210,8 @@ def _load_request_domain(size: int, seed: int) -> List[Row]:
     return _quotas({
         "code": rows(mbpp, "code", "mbpp"),
         "math_or_logic": rows(gsm8k, "math_or_logic", "gsm8k"),
-        "writing": rows([r["instruction"] for r in dolly if r["category"] == "creative_writing"],
+        "writing": rows([r["instruction"] for r in dolly
+                         if r["category"] == "creative_writing" and _WRITING.search(r["instruction"])],
                         "writing", "dolly-15k creative_writing"),
         "factual_lookup": rows([r["instruction"] for r in dolly if r["category"] == "open_qa"],
                                "factual_lookup", "dolly-15k open_qa"),
