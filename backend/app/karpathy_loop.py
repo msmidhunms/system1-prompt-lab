@@ -12,9 +12,10 @@ Three things keep the loop honest on a small, imbalanced, noisy dataset:
 - The objective defaults to the mean of accuracy and macro-F1, so a prompt that
   puts every query in the majority label does not look like progress.
 - With calibration on, a per-label bias is fitted on the dev set for every
-  candidate, so a prompt is judged by how well its probabilities separate the
-  labels and not by which label it happens to favour. Dev scores are cross-fitted
-  (bias fitted on one half, scored on the other).
+  candidate, so a prompt that skews towards one label is judged by how well its
+  probabilities separate the labels and not by which label it happens to favour.
+  The bias is scored cross-fitted (fitted on one half, scored on the other) and
+  is only used when it beats the plain argmax by more than noise.
 - A candidate replaces the best only when a paired bootstrap over the dev queries
   says it is better with KEEP_CONFIDENCE probability.
 
@@ -75,9 +76,9 @@ def build_system_prompt(metric: str, calibrate: bool, use_serp: bool) -> str:
             "but long context can also drown out the query. Whether it helps is an empirical question for the loop."
         )
     calibration = (
-        "A per-label bias is fitted automatically on the dev set for every config, so how often each label gets "
-        "predicted is already corrected for. Do not spend rounds trying to make a label more or less frequent. "
-        "What moves the score is how well the wording separates the labels from each other."
+        "When a config skews towards one label, a per-label bias is fitted automatically on the dev set to correct "
+        "it, so how often each label gets predicted is largely taken care of. Do not spend rounds trying to make a "
+        "label more or less frequent. What moves the score is how well the wording separates the labels from each other."
         if calibrate else
         "No calibration is applied: the label with the highest probability wins. Wording changes can swing which label "
         "the model favours, so watch the predicted-label counts for collapse onto one label."
@@ -190,10 +191,11 @@ def evaluate(
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Run Laya with a prompt config over labelled examples and score it.
 
-    With fit_bias, the label bias is fitted on these examples: the reported predictions
-    are cross-fitted (each half scored with the bias fitted on the other half) and the
-    returned config carries the bias fitted on all of them. Without it, the config's own
-    label_bias (if any) is applied as is.
+    With fit_bias, a label bias is fitted on these examples and scored cross-fitted (each
+    half scored with the bias fitted on the other half). If that beats the plain argmax by
+    more than noise, the returned config carries the bias fitted on all the examples;
+    otherwise it carries none. Without fit_bias, the config's own label_bias (if any) is
+    applied as is.
 
     Returns (config to keep, metrics).
     """
@@ -208,9 +210,17 @@ def evaluate(
         for held in (0, 1):
             bias = fit_label_bias(logp[fold != held], y[fold != held], metric)
             pred[fold == held] = (logp[fold == held] + bias).argmax(axis=1)
-        full_bias = fit_label_bias(logp, y, metric)
-        config = {**config, "label_bias": {label: float(b) for label, b in zip(LABELS, full_bias)}}
-        proba = apply_label_bias(proba, config["label_bias"])
+        # A bias has to earn its place the same way a prompt does. When the model is not
+        # skewed towards a label, fitting one only adds noise, so the plain argmax stands.
+        helps = (objective(y, pred, metric) > objective(y, raw_pred, metric)
+                 and prob_better(y, pred, raw_pred, metric, seed=0) >= KEEP_CONFIDENCE)
+        config = {k: v for k, v in config.items() if k != "label_bias"}
+        if helps:
+            full_bias = fit_label_bias(logp, y, metric)
+            config["label_bias"] = {label: float(b) for label, b in zip(LABELS, full_bias)}
+            proba = apply_label_bias(proba, config["label_bias"])
+        else:
+            pred = raw_pred
     else:
         proba = apply_label_bias(proba, config.get("label_bias"))
         pred = proba.argmax(axis=1)
