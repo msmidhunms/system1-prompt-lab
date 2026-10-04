@@ -4,12 +4,23 @@ Same shape as https://github.com/karpathy/autoresearch, but the thing being
 edited is the Laya prompt config (state template, instructions, label
 descriptions) instead of a training script:
 
-    propose a change (LLM) -> evaluate on the dev set -> keep if accuracy
-    improved, otherwise discard -> repeat.
+    propose a change (LLM) -> evaluate on the dev set -> keep if the score
+    improved by more than noise, otherwise discard -> repeat.
 
-The LLM only ever sees dev examples. A holdout split (EVAL_HOLDOUT_RATIO of all
-golden data, never sampled into dev) is scored once at the end for the baseline
-and the best config. Every run writes its state, per-iteration
+Three things keep the loop honest on a small, imbalanced, noisy dataset:
+
+- The objective defaults to the mean of accuracy and macro-F1, so a prompt that
+  puts every query in the majority label does not look like progress.
+- With calibration on, a per-label bias is fitted on the dev set for every
+  candidate, so a prompt is judged by how well its probabilities separate the
+  labels and not by which label it happens to favour. Dev scores are cross-fitted
+  (bias fitted on one half, scored on the other).
+- A candidate replaces the best only when a paired bootstrap over the dev queries
+  says it is better with KEEP_CONFIDENCE probability.
+
+The LLM only ever sees dev examples. Held-out queries (EVAL_HOLDOUT_RATIO of all
+golden data plus whatever the dev sample did not use) are scored once at the end
+for the baseline and the best config. Every run writes its state, per-iteration
 checkpoints and prompts under autoresearch/runs/<run_id>/, and appends one line
 per experiment to autoresearch/results.tsv.
 """
@@ -18,111 +29,240 @@ import json
 import random
 import threading
 import uuid
-from collections import Counter, defaultdict
+from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from sklearn.metrics import precision_recall_fscore_support
+import numpy as np
 
-from app import llm
+from app import llm, serp
 from app.config import EVAL_HOLDOUT_RATIO, RESULTS_TSV, RUNS_DIR
 from app.database import ExperimentRun, SessionLocal
 from app.laya_inference import (
+    LABELS,
     MAX_CRITERION_WORDS,
     MAX_INSTRUCTION_WORDS,
-    predict_batch,
+    apply_label_bias,
+    predict_proba,
     validate_config,
 )
-from app.tasks.intent.labels import SearchIntent
 
-LABELS = SearchIntent.all_labels()
+METRICS = {
+    "balanced": "mean of accuracy and macro-F1",
+    "accuracy": "accuracy",
+    "macro_f1": "macro-F1",
+}
+KEEP_CONFIDENCE = 0.8
+BOOTSTRAP_SAMPLES = 1000
+MAX_HOLDOUT_SIZE = 500
 MAX_CONSECUTIVE_CRASHES = 3
 ERRORS_SHOWN = 40
-CORRECT_SHOWN = 12
+GOLD_SHOWN_PER_LABEL = 8
 HISTORY_SHOWN = 15
+BIAS_GRID = sorted(np.round(np.linspace(-2.0, 2.0, 41), 2), key=abs)
 
-SYSTEM_PROMPT = f"""You are running an autoresearch loop that improves a small classifier by rewriting its prompt.
 
-The classifier is Laya, a fast non-autoregressive "System 1" model. It is not a chat LLM: in one forward pass it reads a state, a question's instructions and a short description of each option, and outputs a probability per option. It cannot reason step by step, follow long rule lists, or use examples the way you can. It responds to the wording of the text it is given.
+def build_system_prompt(metric: str, calibrate: bool, use_serp: bool) -> str:
+    state_lines = [
+        '- "state_template": how each search query is presented to the model. Either a plain string, or a JSON object '
+        "of field name -> string, which is passed to the model as a JSON state. It must contain {query} exactly once.",
+    ]
+    if use_serp:
+        state_lines.append(
+            "  You may also use {serp_sites} (domains of the top-ranking results), {serp_titles} (their titles) and "
+            f'{{serp_snippets}} (their snippets), and set "serp_results" (1 to {serp.MAX_RESULTS}) for how many top '
+            "results they draw on. The gold labels were produced from search results, so this context can carry signal, "
+            "but long context can also drown out the query. Whether it helps is an empirical question for the loop."
+        )
+    calibration = (
+        "A per-label bias is fitted automatically on the dev set for every config, so how often each label gets "
+        "predicted is already corrected for. Do not spend rounds trying to make a label more or less frequent. "
+        "What moves the score is how well the wording separates the labels from each other."
+        if calibrate else
+        "No calibration is applied: the label with the highest probability wins. Wording changes can swing which label "
+        "the model favours, so watch the predicted-label counts for collapse onto one label."
+    )
+    serp_field = '\n  "serp_results": 4,' if use_serp else ""
+    return f"""You are running an autoresearch loop that improves a small classifier by rewriting the text it is given.
 
-The task is search-intent classification of search queries into exactly these labels: {", ".join(LABELS)}. The gold labels come from an SEO data provider, so their conventions may differ from the textbook definitions. Infer the real conventions from the data you are shown.
+The classifier is Laya, a fast non-autoregressive "System 1" model. It is not a chat LLM: in one forward pass it reads a state, a question's instructions and a short description of each option, and outputs a probability per option. It cannot reason step by step or follow long rule lists. It responds to the wording and the format of what it is given.
 
-You may change three things, and nothing else:
-- "state_template": how the raw query is presented to the model. It must contain {{query}} exactly once.
+The task is search-intent classification of search queries into exactly these labels: {", ".join(LABELS)}. The gold labels come from an SEO data provider and are noisy, and their conventions differ from the textbook definitions. Infer the real conventions from the gold examples you are shown.
+
+You may change these things, and nothing else:
+{chr(10).join(state_lines)}
 - "instructions": the question the model answers.
 - "criteria": one description per label. The label names and their number are fixed.
 
-Hard limits of the model:
+What is known about Laya from its own presets and from measurements on this dataset:
+- It was trained on states that are JSON objects with named fields, and instructions that name the field in backticks. Example from its presets: state {{"message": "..."}} with instructions "What does the customer want in `message`?". On this dataset a bare-string state made the model put about 95% of queries into a single label, while the same wording with a state of {{"query": "{{query}}"}} and `query` named in the instructions produced a real spread of predictions.
+- Its presets describe options in short plain language, for example "money returned or a duplicate charge reversed" or "a bug, outage or integration problem", not as keyword lists.
 - Each criteria description is cut off after about 48 tokens. Stay under {MAX_CRITERION_WORDS} words each and put the most discriminating words first.
 - Keep instructions under {MAX_INSTRUCTION_WORDS} words.
 
-How the loop works: each round you propose one new config. It is scored on a dev set. If its accuracy beats the current best it becomes the new best, otherwise it is discarded and you continue from the current best. A separate holdout set you never see is scored at the end, so describing kinds of queries generalises and pasting specific dev queries does not.
+How the loop scores a config: it is run on a dev set and scored by {METRICS[metric]}. {calibration}
 
-Make one clear, testable change per round and say what you expect it to fix. Use the experiment history: do not repeat a discarded idea, and try a different direction when several rounds in a row were discarded.
+A config replaces the current best only if it scores higher AND a paired bootstrap over the dev queries says the gain is real with probability {KEEP_CONFIDENCE}. A one-or-two-query gain is noise and is discarded. A separate held-out set you never see is scored at the end, so describing kinds of queries generalises and pasting specific dev queries does not.
+
+Make one clear, testable change per round and say what you expect it to fix. Use the experiment history: it shows, for every past round, how the predicted-label counts and per-label recall moved. Do not repeat a discarded idea, and try a different direction when several rounds in a row were discarded.
 
 Reply with a single JSON object and nothing else:
 {{
   "hypothesis": "one or two sentences: what you are changing and why it should help",
-  "state_template": "...",
+  "state_template": {{"query": "{{query}}"}},{serp_field}
   "instructions": "...",
   "criteria": {{{", ".join(f'"{label}": "..."' for label in LABELS)}}}
 }}"""
 
 
-# ---------------------------------------------------------------- evaluation
+# ---------------------------------------------------------------- scoring
+
+def _label_scores(y: np.ndarray, pred: np.ndarray) -> Tuple[float, float, np.ndarray]:
+    """(accuracy, macro-F1 over labels present in y, confusion[actual][predicted])."""
+    k = len(LABELS)
+    confusion = np.bincount(y * k + pred, minlength=k * k).reshape(k, k)
+    hits = np.diag(confusion)
+    support, predicted = confusion.sum(axis=1), confusion.sum(axis=0)
+    f1 = 2 * hits / np.maximum(support + predicted, 1)
+    return hits.sum() / len(y), float(f1[support > 0].mean()), confusion
+
+
+def objective(y: np.ndarray, pred: np.ndarray, metric: str) -> float:
+    accuracy, macro_f1, _ = _label_scores(y, pred)
+    if metric == "accuracy":
+        return float(accuracy)
+    if metric == "macro_f1":
+        return macro_f1
+    return float((accuracy + macro_f1) / 2)
+
+
+def fit_label_bias(logp: np.ndarray, y: np.ndarray, metric: str) -> np.ndarray:
+    """Per-label offsets on the log-probabilities that maximise the objective (coordinate ascent)."""
+    bias = np.zeros(len(LABELS))
+    best = objective(y, logp.argmax(axis=1), metric)
+    for _ in range(3):
+        moved = False
+        for k in range(len(LABELS)):
+            # Smallest offsets first, and only strict gains move: ties keep the bias small.
+            for value in BIAS_GRID:
+                trial = bias.copy()
+                trial[k] = value
+                score = objective(y, (logp + trial).argmax(axis=1), metric)
+                if score > best + 1e-9:
+                    best, bias, moved = score, trial, True
+        if not moved:
+            break
+    return bias
+
+
+def prob_better(y: np.ndarray, pred_new: np.ndarray, pred_old: np.ndarray, metric: str, seed: int) -> float:
+    """Paired bootstrap: probability that pred_new scores above pred_old on a resampled dev set."""
+    rng = np.random.default_rng(seed)
+    wins = 0.0
+    for _ in range(BOOTSTRAP_SAMPLES):
+        idx = rng.integers(0, len(y), len(y))
+        new, old = objective(y[idx], pred_new[idx], metric), objective(y[idx], pred_old[idx], metric)
+        wins += 1.0 if new > old else 0.5 if new == old else 0.0
+    return wins / BOOTSTRAP_SAMPLES
+
 
 def split_examples(
     examples: List[Dict[str, str]], sample_size: int, seed: int
 ) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
-    """Seeded shuffle, reserve the holdout share of all data, sample the dev set from the rest."""
+    """Seeded shuffle into (dev, holdout).
+
+    The holdout share of all data is reserved first, dev is sampled from the rest, and
+    whatever dev did not use joins the holdout (capped), since it costs nothing to keep unseen.
+    """
     shuffled = sorted(examples, key=lambda e: e["query"])
     random.Random(seed).shuffle(shuffled)
-    holdout_size = max(1, round(len(shuffled) * EVAL_HOLDOUT_RATIO))
-    holdout, rest = shuffled[:holdout_size], shuffled[holdout_size:]
-    return rest[:sample_size], holdout
+    reserved_size = max(1, round(len(shuffled) * EVAL_HOLDOUT_RATIO))
+    reserved, rest = shuffled[:reserved_size], shuffled[reserved_size:]
+    dev, unused = rest[:sample_size], rest[sample_size:]
+    return dev, (reserved + unused)[:MAX_HOLDOUT_SIZE]
 
 
-def evaluate(config: Dict[str, Any], examples: List[Dict[str, str]]) -> Dict[str, Any]:
-    """Run Laya with a prompt config over labelled examples and score it."""
-    predictions = predict_batch([e["query"] for e in examples], config)
-    true = [e["intent"] for e in examples]
-    pred = [p["intent"] for p in predictions]
+def evaluate(
+    config: Dict[str, Any],
+    examples: List[Dict[str, str]],
+    metric: str,
+    fit_bias: bool,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Run Laya with a prompt config over labelled examples and score it.
 
-    precision, recall, f1, support = precision_recall_fscore_support(
-        true, pred, labels=LABELS, zero_division=0
-    )
-    per_class = {
-        label: {
-            "precision": round(float(p), 3),
-            "recall": round(float(r), 3),
-            "f1": round(float(f), 3),
-            "support": int(s),
+    With fit_bias, the label bias is fitted on these examples: the reported predictions
+    are cross-fitted (each half scored with the bias fitted on the other half) and the
+    returned config carries the bias fitted on all of them. Without it, the config's own
+    label_bias (if any) is applied as is.
+
+    Returns (config to keep, metrics).
+    """
+    y = np.array([LABELS.index(e["intent"]) for e in examples])
+    proba = predict_proba([e["query"] for e in examples], config)
+    raw_pred = proba.argmax(axis=1)
+
+    if fit_bias:
+        logp = np.log(proba + 1e-9)
+        pred = np.empty(len(y), dtype=int)
+        fold = np.arange(len(y)) % 2
+        for held in (0, 1):
+            bias = fit_label_bias(logp[fold != held], y[fold != held], metric)
+            pred[fold == held] = (logp[fold == held] + bias).argmax(axis=1)
+        full_bias = fit_label_bias(logp, y, metric)
+        config = {**config, "label_bias": {label: float(b) for label, b in zip(LABELS, full_bias)}}
+        proba = apply_label_bias(proba, config["label_bias"])
+    else:
+        proba = apply_label_bias(proba, config.get("label_bias"))
+        pred = proba.argmax(axis=1)
+
+    accuracy, macro_f1, confusion = _label_scores(y, pred)
+    raw_accuracy, raw_macro_f1, _ = _label_scores(y, raw_pred)
+    support, predicted = confusion.sum(axis=1), confusion.sum(axis=0)
+    per_class = {}
+    for k, label in enumerate(LABELS):
+        hit = int(confusion[k, k])
+        precision = hit / predicted[k] if predicted[k] else 0.0
+        recall = hit / support[k] if support[k] else 0.0
+        per_class[label] = {
+            "precision": round(precision, 3),
+            "recall": round(recall, 3),
+            "f1": round(2 * hit / (support[k] + predicted[k]) if support[k] + predicted[k] else 0.0, 3),
+            "support": int(support[k]),
         }
-        for label, p, r, f, s in zip(LABELS, precision, recall, f1, support)
-    }
-    confusion = {t: {p: 0 for p in LABELS} for t in LABELS}
-    cases = []
-    for example, prediction in zip(examples, predictions):
-        if example["intent"] in confusion:
-            confusion[example["intent"]][prediction["intent"]] += 1
-        cases.append({
+    cases = [
+        {
             "query": example["query"],
             "actual": example["intent"],
-            "predicted": prediction["intent"],
-            "confidence": prediction["confidence"],
-            "correct": example["intent"] == prediction["intent"],
-        })
-
-    correct = sum(c["correct"] for c in cases)
-    return {
-        "accuracy": round(correct / len(cases), 4),
-        "macro_f1": round(float(sum(f1) / len(LABELS)), 4),
-        "correct": correct,
+            "predicted": LABELS[p],
+            "confidence": round(float(proba[i, p]), 4),
+            "correct": bool(p == y[i]),
+        }
+        for i, (example, p) in enumerate(zip(examples, pred))
+    ]
+    metrics = {
+        "score": round(objective(y, pred, metric), 4),
+        "accuracy": round(float(accuracy), 4),
+        "macro_f1": round(macro_f1, 4),
+        # Plain argmax with no label bias, to show what calibration contributes.
+        "raw_accuracy": round(float(raw_accuracy), 4),
+        "raw_macro_f1": round(raw_macro_f1, 4),
+        "correct": int(np.diag(confusion).sum()),
         "total": len(cases),
+        "predicted_counts": {label: int(n) for label, n in zip(LABELS, predicted)},
+        "gold_counts": {label: int(n) for label, n in zip(LABELS, support)},
         "per_class": per_class,
-        "confusion": confusion,  # confusion[actual][predicted]
+        "confusion": {a: {p: int(confusion[i, j]) for j, p in enumerate(LABELS)} for i, a in enumerate(LABELS)},
         "cases": cases,
     }
+    return config, metrics
+
+
+def _pred_array(metrics: Dict[str, Any]) -> np.ndarray:
+    return np.array([LABELS.index(c["predicted"]) for c in metrics["cases"]])
+
+
+def _gold_array(metrics: Dict[str, Any]) -> np.ndarray:
+    return np.array([LABELS.index(c["actual"]) for c in metrics["cases"]])
 
 
 def summarise(metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -131,6 +271,11 @@ def summarise(metrics: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------- prompt
+
+def _proposal_view(config: Dict[str, Any]) -> Dict[str, Any]:
+    """The part of a config the LLM writes (no checkpoint name, no fitted bias)."""
+    return {k: v for k, v in config.items() if k not in ("model", "label_bias")}
+
 
 def _sample_errors(cases: List[Dict[str, Any]], rng: random.Random, limit: int) -> List[Dict[str, Any]]:
     """Pick errors round-robin across (actual, predicted) pairs so every confusion is represented."""
@@ -150,6 +295,10 @@ def _sample_errors(cases: List[Dict[str, Any]], rng: random.Random, limit: int) 
     return picked
 
 
+def _counts_line(counts: Dict[str, int]) -> str:
+    return ", ".join(f"{label} {counts[label]}" for label in LABELS)
+
+
 def build_user_prompt(
     best_config: Dict[str, Any],
     best_metrics: Dict[str, Any],
@@ -157,20 +306,28 @@ def build_user_prompt(
     iteration: int,
     total_iterations: int,
     seed: int,
+    metric: str,
+    use_serp: bool,
 ) -> str:
     rng = random.Random(seed * 1000 + iteration)
-    errors = _sample_errors(best_metrics["cases"], rng, ERRORS_SHOWN)
-    correct = [c for c in best_metrics["cases"] if c["correct"]]
-    rng.shuffle(correct)
+    cases = best_metrics["cases"]
+
+    def with_sites(query: str) -> str:
+        if not use_serp:
+            return ""
+        sites = ", ".join(r["site"] for r in serp.lookup(query)[:3])
+        return f"  top sites: {sites}" if sites else ""
 
     lines = [
-        f"Round {iteration} of {total_iterations}.",
+        f"Round {iteration} of {total_iterations}. Objective: {METRICS[metric]}.",
         "",
         "## Current best config",
-        json.dumps(best_config, indent=2, ensure_ascii=False),
+        json.dumps(_proposal_view(best_config), indent=2, ensure_ascii=False),
         "",
         f"## Its dev-set results ({best_metrics['total']} queries)",
-        f"accuracy: {best_metrics['accuracy']:.4f}   macro-F1: {best_metrics['macro_f1']:.4f}",
+        f"score: {best_metrics['score']:.4f}   accuracy: {best_metrics['accuracy']:.4f}   macro-F1: {best_metrics['macro_f1']:.4f}",
+        f"gold label counts:      {_counts_line(best_metrics['gold_counts'])}",
+        f"predicted label counts: {_counts_line(best_metrics['predicted_counts'])}",
         "",
         "Per class (precision / recall / f1 / support):",
     ]
@@ -184,14 +341,22 @@ def build_user_prompt(
         row = best_metrics["confusion"][actual]
         lines.append(f"{actual} | " + " | ".join(str(row[p]) for p in LABELS))
 
+    lines += ["", "## What the gold labels look like (random dev queries per label)"]
+    for label in LABELS:
+        gold = [c for c in cases if c["actual"] == label]
+        rng.shuffle(gold)
+        lines.append(f"{label}:")
+        for case in gold[:GOLD_SHOWN_PER_LABEL]:
+            lines.append(f'- "{case["query"]}"{with_sites(case["query"])}')
+
+    errors = _sample_errors(cases, rng, ERRORS_SHOWN)
     total_errors = best_metrics["total"] - best_metrics["correct"]
     lines += ["", f"## Misclassified dev queries ({len(errors)} of {total_errors} shown)"]
     for case in errors:
-        lines.append(f'- "{case["query"]}"  gold={case["actual"]}  predicted={case["predicted"]} ({case["confidence"]:.2f})')
-
-    lines += ["", "## Some correctly classified dev queries"]
-    for case in correct[:CORRECT_SHOWN]:
-        lines.append(f'- "{case["query"]}"  {case["actual"]}')
+        lines.append(
+            f'- "{case["query"]}"  gold={case["actual"]}  predicted={case["predicted"]} '
+            f'({case["confidence"]:.2f}){with_sites(case["query"])}'
+        )
 
     lines += ["", "## Experiment history (oldest first)"]
     if not history:
@@ -200,22 +365,27 @@ def build_user_prompt(
         if item["status"] == "crash":
             lines.append(f"- round {item['iteration']}: CRASH ({item['error']})")
             continue
-        lines.append(
-            f"- round {item['iteration']}: {item['status'].upper()}  "
-            f"accuracy {item['accuracy']:.4f} ({item['delta_vs_best']:+.4f} vs best at the time)  "
-            f"hypothesis: {item['hypothesis']}"
-        )
+        recall = ", ".join(f"{label} {item['per_class'][label]['recall']:.2f}" for label in LABELS)
+        lines += [
+            f"- round {item['iteration']}: {item['status'].upper()}  score {item['score']:.4f} "
+            f"({item['delta_vs_best']:+.4f} vs best at the time, P(better)={item['p_better']:.2f})  "
+            f"accuracy {item['accuracy']:.4f}  macro-F1 {item['macro_f1']:.4f}",
+            f"  hypothesis: {item['hypothesis']}",
+            f"  predicted counts: {_counts_line(item['predicted_counts'])}   recall: {recall}",
+        ]
         if item["status"] == "discard":
-            lines.append(f"  discarded config: {json.dumps(item['config'], ensure_ascii=False)}")
+            lines.append(f"  discarded config: {json.dumps(_proposal_view(item['config']), ensure_ascii=False)}")
 
     lines += ["", "Propose the next config as a single JSON object."]
     return "\n".join(lines)
 
 
-def parse_proposal(raw_reply: str) -> Tuple[Dict[str, Any], str, List[str]]:
+def parse_proposal(raw_reply: str, use_serp: bool, laya_model: str) -> Tuple[Dict[str, Any], str, List[str]]:
     """Turn the LLM's reply into (config, hypothesis, warnings)."""
     proposal = llm.extract_json(raw_reply)
-    config, warnings = validate_config(proposal)
+    # The checkpoint is a run setting and the bias is fitted, so neither is taken from the LLM.
+    proposal = {**proposal, "model": laya_model}
+    config, warnings = validate_config(proposal, allow_serp=use_serp)
     hypothesis = str(proposal.get("hypothesis", "")).strip() or "(no hypothesis given)"
     return config, hypothesis, warnings
 
@@ -252,14 +422,15 @@ def _log(run: Dict[str, Any], message: str) -> None:
 
 
 def _append_results_tsv(run_id: str, iteration: int, metrics: Optional[Dict[str, Any]], status: str, description: str) -> None:
-    new_file = not RESULTS_TSV.exists()
+    if not RESULTS_TSV.exists():
+        RESULTS_TSV.write_text(
+            "timestamp\trun_id\titeration\tdev_accuracy\tmacro_f1\tstatus\tdescription\tscore\n", encoding="utf-8"
+        )
+    accuracy, macro_f1, score = (f"{metrics[k]:.4f}" if metrics else "0.0000" for k in ("accuracy", "macro_f1", "score"))
+    description = " ".join(description.split())
     with open(RESULTS_TSV, "a", encoding="utf-8") as f:
-        if new_file:
-            f.write("timestamp\trun_id\titeration\tdev_accuracy\tmacro_f1\tstatus\tdescription\n")
-        accuracy = f"{metrics['accuracy']:.4f}" if metrics else "0.0000"
-        macro_f1 = f"{metrics['macro_f1']:.4f}" if metrics else "0.0000"
-        description = " ".join(description.split())
-        f.write(f"{_now()}\t{run_id}\t{iteration}\t{accuracy}\t{macro_f1}\t{status}\t{description}\n")
+        # score is the last column so lines written before it existed still line up.
+        f.write(f"{_now()}\t{run_id}\t{iteration}\t{accuracy}\t{macro_f1}\t{status}\t{description}\t{score}\n")
 
 
 def get_run(run_id: str) -> Optional[Dict[str, Any]]:
@@ -285,6 +456,7 @@ def list_runs() -> List[Dict[str, Any]]:
         run = get_run(run_dir.name) if run_dir.is_dir() else None
         if not run:
             continue
+        baseline = run.get("baseline") or {}
         summaries.append({
             "run_id": run["run_id"],
             "status": run["status"],
@@ -294,8 +466,10 @@ def list_runs() -> List[Dict[str, Any]]:
             "loops": run["loops"],
             "completed_iterations": len(run["iterations"]),
             "dev_size": run["dev_size"],
-            "baseline_accuracy": run["baseline"]["accuracy"] if run.get("baseline") else None,
+            "baseline_accuracy": baseline.get("accuracy"),
+            "baseline_macro_f1": baseline.get("macro_f1"),
             "best_accuracy": run.get("best_accuracy"),
+            "best_macro_f1": run.get("best_macro_f1"),
             "best_iteration": run.get("best_iteration"),
             "improved": run.get("improved", False),
         })
@@ -323,12 +497,23 @@ def start_run(
     seed: int,
     start_config: Dict[str, Any],
     start_version: str,
+    metric: str,
+    calibrate: bool,
+    use_serp: bool,
+    laya_model: str,
 ) -> Dict[str, Any]:
     """Create a run and start it on a background thread. Only one run at a time."""
     global _active_run_id
+    if metric not in METRICS:
+        raise ValueError(f"metric must be one of {list(METRICS)}")
+    if use_serp and not serp.available():
+        raise ValueError(f"SERP context needs {serp.SERP_FILE}, which was not found")
     dev, holdout = split_examples(examples, sample_size, seed)
-    if len(dev) < 5:
+    if len(dev) < 20:
         raise ValueError("Not enough labelled data for a dev set")
+
+    # The run's checkpoint replaces the start version's, and any saved bias is refitted or dropped.
+    baseline_config, _ = validate_config({**start_config, "model": laya_model})
 
     run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     run = {
@@ -341,12 +526,19 @@ def start_run(
         "loops": loops,
         "seed": seed,
         "start_version": start_version,
+        "metric": metric,
+        "calibrate": calibrate,
+        "use_serp": use_serp,
+        "laya_model": laya_model,
+        "keep_confidence": KEEP_CONFIDENCE,
         "dev_size": len(dev),
         "holdout_size": len(holdout),
-        "baseline_config": start_config,
+        "baseline_config": baseline_config,
         "baseline": None,
-        "best_config": start_config,
+        "best_config": baseline_config,
+        "best_score": None,
         "best_accuracy": None,
+        "best_macro_f1": None,
         "best_iteration": 0,
         "improved": False,
         "iterations": [],
@@ -379,6 +571,8 @@ def _run_loop(run: Dict[str, Any], dev: List[Dict[str, str]], holdout: List[Dict
     run_id = run["run_id"]
     run_dir = RUNS_DIR / run_id
     stop = _stop_events[run_id]
+    metric, calibrate, use_serp = run["metric"], run["calibrate"], run["use_serp"]
+    system_prompt = build_system_prompt(metric, calibrate, use_serp)
 
     def update(**fields):
         with _state_lock:
@@ -386,19 +580,23 @@ def _run_loop(run: Dict[str, Any], dev: List[Dict[str, str]], holdout: List[Dict
         _persist(run)
 
     try:
-        _log(run, f"Run started: {len(dev)} dev / {len(holdout)} holdout queries, "
-                  f"{run['loops']} rounds, LLM {llm_config['provider']}:{llm_config['model'] or 'default'}")
+        _log(run, f"Run started: {len(dev)} dev / {len(holdout)} holdout queries, {run['loops']} rounds, "
+                  f"LLM {llm_config['provider']}:{llm_config['model'] or 'default'}, Laya {run['laya_model']}, "
+                  f"objective {metric}, calibration {'on' if calibrate else 'off'}, SERP {'on' if use_serp else 'off'}")
 
-        baseline_config = run["baseline_config"]
+        baseline_config, best_metrics = evaluate(run["baseline_config"], dev, metric, fit_bias=calibrate)
         best_config = baseline_config
-        best_metrics = evaluate(best_config, dev)
+        y = _gold_array(best_metrics)
         _write_json(run_dir / "iter_000_baseline.json", {
             "iteration": 0, "status": "baseline", "config": best_config, "metrics": best_metrics,
         })
-        _write_json(run_dir / "best_config.json", {"iteration": 0, "accuracy": best_metrics["accuracy"], "config": best_config})
+        _write_json(run_dir / "best_config.json", {"iteration": 0, "score": best_metrics["score"], "config": best_config})
         _append_results_tsv(run_id, 0, best_metrics, "baseline", f"baseline ({run['start_version']})")
-        update(baseline=summarise(best_metrics), best_accuracy=best_metrics["accuracy"], phase="looping")
-        _log(run, f"Baseline dev accuracy {best_metrics['accuracy']:.4f}")
+        update(baseline=summarise(best_metrics), baseline_config=baseline_config, best_config=best_config,
+               best_score=best_metrics["score"], best_accuracy=best_metrics["accuracy"],
+               best_macro_f1=best_metrics["macro_f1"], phase="looping")
+        _log(run, f"Baseline: score {best_metrics['score']:.4f}, accuracy {best_metrics['accuracy']:.4f}, "
+                  f"macro-F1 {best_metrics['macro_f1']:.4f}, predicted {_counts_line(best_metrics['predicted_counts'])}")
 
         history: List[Dict[str, Any]] = []
         consecutive_crashes = 0
@@ -409,20 +607,20 @@ def _run_loop(run: Dict[str, Any], dev: List[Dict[str, str]], holdout: List[Dict
                 break
 
             update(phase=f"round {i}: asking the LLM")
-            user_prompt = build_user_prompt(best_config, best_metrics, history, i, run["loops"], run["seed"])
+            user_prompt = build_user_prompt(best_config, best_metrics, history, i, run["loops"], run["seed"], metric, use_serp)
             with open(run_dir / f"iter_{i:03d}_prompt.txt", "w", encoding="utf-8") as f:
-                f.write(SYSTEM_PROMPT + "\n\n-----\n\n" + user_prompt)
+                f.write(system_prompt + "\n\n-----\n\n" + user_prompt)
 
             entry: Dict[str, Any] = {"iteration": i, "timestamp": _now()}
             raw_reply = None
             try:
-                raw_reply = llm.complete(llm_config, SYSTEM_PROMPT, user_prompt)
-                candidate, hypothesis, warnings = parse_proposal(raw_reply)
+                raw_reply = llm.complete(llm_config, system_prompt, user_prompt)
+                candidate, hypothesis, warnings = parse_proposal(raw_reply, use_serp, run["laya_model"])
             except (llm.LLMError, ValueError) as e:
                 consecutive_crashes += 1
-                entry.update(status="crash", error=str(e), hypothesis=None, config=None,
-                             accuracy=None, macro_f1=None, delta_vs_best=None,
-                             best_accuracy=best_metrics["accuracy"], warnings=[])
+                entry.update(status="crash", error=str(e), hypothesis=None, config=None, score=None,
+                             accuracy=None, macro_f1=None, delta_vs_best=None, p_better=None,
+                             best_score=best_metrics["score"], warnings=[])
                 _write_json(run_dir / f"iter_{i:03d}.json", {**entry, "llm_reply": raw_reply})
                 _append_results_tsv(run_id, i, None, "crash", str(e))
                 history.append(entry)
@@ -436,18 +634,20 @@ def _run_loop(run: Dict[str, Any], dev: List[Dict[str, str]], holdout: List[Dict
             consecutive_crashes = 0
 
             update(phase=f"round {i}: evaluating on {len(dev)} dev queries")
-            metrics = evaluate(candidate, dev)
-            delta = round(metrics["accuracy"] - best_metrics["accuracy"], 4)
-            kept = metrics["accuracy"] > best_metrics["accuracy"]
+            candidate, metrics = evaluate(candidate, dev, metric, fit_bias=calibrate)
+            delta = round(metrics["score"] - best_metrics["score"], 4)
+            p_better = prob_better(y, _pred_array(metrics), _pred_array(best_metrics), metric, run["seed"] + i)
+            kept = delta > 0 and p_better >= KEEP_CONFIDENCE
             status = "keep" if kept else "discard"
 
             if kept:
                 best_config, best_metrics = candidate, metrics
-                _write_json(run_dir / "best_config.json", {"iteration": i, "accuracy": metrics["accuracy"], "config": candidate})
+                _write_json(run_dir / "best_config.json", {"iteration": i, "score": metrics["score"], "config": candidate})
 
             entry.update(status=status, error=None, hypothesis=hypothesis, config=candidate,
-                         accuracy=metrics["accuracy"], macro_f1=metrics["macro_f1"],
-                         delta_vs_best=delta, best_accuracy=best_metrics["accuracy"],
+                         score=metrics["score"], accuracy=metrics["accuracy"], macro_f1=metrics["macro_f1"],
+                         raw_accuracy=metrics["raw_accuracy"], delta_vs_best=delta, p_better=round(p_better, 3),
+                         best_score=best_metrics["score"], predicted_counts=metrics["predicted_counts"],
                          per_class=metrics["per_class"], warnings=warnings)
             _write_json(run_dir / f"iter_{i:03d}.json", {**entry, "metrics": metrics, "llm_reply": raw_reply})
             _append_results_tsv(run_id, i, metrics, status, hypothesis)
@@ -455,25 +655,34 @@ def _run_loop(run: Dict[str, Any], dev: List[Dict[str, str]], holdout: List[Dict
             with _state_lock:
                 run["iterations"].append(entry)
                 if kept:
-                    run.update(best_config=candidate, best_accuracy=metrics["accuracy"], best_iteration=i)
+                    run.update(best_config=candidate, best_score=metrics["score"], best_accuracy=metrics["accuracy"],
+                               best_macro_f1=metrics["macro_f1"], best_iteration=i)
             _persist(run)
-            _log(run, f"Round {i}: {status.upper()} accuracy {metrics['accuracy']:.4f} ({delta:+.4f}) - {hypothesis}")
+            _log(run, f"Round {i}: {status.upper()} score {metrics['score']:.4f} ({delta:+.4f}, P(better)={p_better:.2f}), "
+                      f"accuracy {metrics['accuracy']:.4f}, macro-F1 {metrics['macro_f1']:.4f}, "
+                      f"predicted {_counts_line(metrics['predicted_counts'])} - {hypothesis}")
 
-        update(phase="scoring the holdout set")
-        holdout_baseline = evaluate(baseline_config, holdout)
+        update(phase=f"scoring {len(holdout)} holdout queries")
         improved = run["best_iteration"] > 0
-        holdout_best = evaluate(best_config, holdout) if improved else holdout_baseline
-        _write_json(run_dir / "holdout_results.json", {"baseline": holdout_baseline, "best": holdout_best})
-        _log(run, f"Holdout accuracy: baseline {holdout_baseline['accuracy']:.4f}, best {holdout_best['accuracy']:.4f}")
+        # The bias fitted on dev is applied as is: nothing is fitted on the holdout.
+        _, holdout_baseline = evaluate(baseline_config, holdout, metric, fit_bias=False)
+        holdout_best = evaluate(best_config, holdout, metric, fit_bias=False)[1] if improved else holdout_baseline
+        holdout_p = prob_better(_gold_array(holdout_best), _pred_array(holdout_best), _pred_array(holdout_baseline),
+                                metric, run["seed"]) if improved else None
+        _write_json(run_dir / "holdout_results.json", {"baseline": holdout_baseline, "best": holdout_best, "p_better": holdout_p})
+        _log(run, f"Holdout: baseline score {holdout_baseline['score']:.4f} (accuracy {holdout_baseline['accuracy']:.4f}, "
+                  f"macro-F1 {holdout_baseline['macro_f1']:.4f}), best score {holdout_best['score']:.4f} "
+                  f"(accuracy {holdout_best['accuracy']:.4f}, macro-F1 {holdout_best['macro_f1']:.4f})"
+                  + (f", P(better)={holdout_p:.2f}" if holdout_p is not None else ""))
 
         update(
-            holdout={"baseline": summarise(holdout_baseline), "best": summarise(holdout_best)},
+            holdout={"baseline": summarise(holdout_baseline), "best": summarise(holdout_best), "p_better": holdout_p},
             improved=improved,
             status="stopped" if stop.is_set() else "completed",
             phase="done",
             finished_at=_now(),
         )
-        _log(run, f"Run finished: dev accuracy {run['baseline']['accuracy']:.4f} -> {run['best_accuracy']:.4f} "
+        _log(run, f"Run finished: dev score {run['baseline']['score']:.4f} -> {run['best_score']:.4f} "
                   f"(best round {run['best_iteration']})")
         _record_experiment(run)
     except Exception as e:  # noqa: BLE001 - a failed run must be recorded, not lost with the thread

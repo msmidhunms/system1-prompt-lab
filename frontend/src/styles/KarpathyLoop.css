@@ -598,6 +598,36 @@
   cursor: not-allowed;
 }
 
+.loop-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+  font-size: 0.92em;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.loop-toggles label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.metric-note {
+  margin-top: 0.4rem;
+  font-size: 0.85em;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.metric-note.positive {
+  color: #51cf66;
+  font-weight: 600;
+}
+
+.config-row.fixed dd {
+  color: rgba(255, 255, 255, 0.6);
+}
+
 .stop-loop-btn {
   padding: 0.6rem 2rem;
   background: rgba(255, 107, 107, 0.15);
@@ -822,6 +852,7 @@
   }
 
   .karpathy-loop .control-group label,
+  .loop-toggles,
   .progress-line {
     color: rgba(0, 0, 0, 0.75);
   }
@@ -843,6 +874,8 @@
   }
 
   .iterations-table th,
+  .metric-note,
+  .config-row.fixed dd,
   .config-view dt,
   .run-meta,
   .control-hint,

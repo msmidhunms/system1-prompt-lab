@@ -15,16 +15,23 @@ interface GoldenDataStats {
 }
 
 interface PromptConfig {
-  state_template: string
+  state_template: string | Record<string, string>
+  serp_results?: number
   instructions: string
   criteria: Record<string, string>
+  model?: string
+  label_bias?: Record<string, number>
 }
 
+// Runs recorded before the loop scored by objective have no score / macro-F1 / counts.
 interface Metrics {
+  score?: number
   accuracy: number
   macro_f1: number
+  raw_accuracy?: number
   correct: number
   total: number
+  predicted_counts?: Record<string, number>
 }
 
 interface LoopIteration {
@@ -33,10 +40,12 @@ interface LoopIteration {
   status: 'keep' | 'discard' | 'crash'
   hypothesis: string | null
   config: PromptConfig | null
+  score?: number | null
   accuracy: number | null
   macro_f1: number | null
   delta_vs_best: number | null
-  best_accuracy: number
+  p_better?: number | null
+  predicted_counts?: Record<string, number>
   warnings: string[]
   error: string | null
 }
@@ -51,16 +60,23 @@ interface Run {
   loops: number
   seed: number
   start_version: string
+  metric?: string
+  calibrate?: boolean
+  use_serp?: boolean
+  laya_model?: string
+  keep_confidence?: number
   dev_size: number
   holdout_size: number
   baseline_config: PromptConfig
   baseline: Metrics | null
   best_config: PromptConfig
+  best_score?: number | null
   best_accuracy: number | null
+  best_macro_f1?: number | null
   best_iteration: number
   improved: boolean
   iterations: LoopIteration[]
-  holdout: { baseline: Metrics; best: Metrics } | null
+  holdout: { baseline: Metrics; best: Metrics; p_better?: number | null } | null
   error: string | null
   log: string[]
 }
@@ -74,7 +90,9 @@ interface RunSummary {
   completed_iterations: number
   dev_size: number
   baseline_accuracy: number | null
+  baseline_macro_f1?: number | null
   best_accuracy: number | null
+  best_macro_f1?: number | null
   best_iteration: number | null
   improved: boolean
 }
@@ -84,16 +102,30 @@ interface ModelVersion {
   accuracy: number | null
 }
 
-const pct = (value: number | null | undefined) => (value == null ? '-' : `${(value * 100).toFixed(2)}%`)
-const signedPts = (value: number) => `${value > 0 ? '+' : ''}${(value * 100).toFixed(2)} pts`
+interface LoopOptions {
+  metrics: Record<string, string>
+  laya_models: string[]
+  serp_available: boolean
+  keep_confidence: number
+}
+
+const pct = (value: number | null | undefined) => (value == null ? '-' : `${(value * 100).toFixed(1)}%`)
+const signedPts = (value: number) => `${value > 0 ? '+' : ''}${(value * 100).toFixed(1)} pts`
+const arrow = (from: number | null | undefined, to: number | null | undefined) => `${pct(from)} → ${pct(to)}`
+const stateText = (state: PromptConfig['state_template']) => (typeof state === 'string' ? state : JSON.stringify(state))
+const countsText = (counts: Record<string, number>) => LABELS.map((label) => `${label} ${counts[label] ?? 0}`).join(' · ')
 
 function ConfigView({ config, previous }: { config: PromptConfig; previous?: PromptConfig }) {
   const changed = (a: string, b: string | undefined) => previous !== undefined && a !== b
+  const state = stateText(config.state_template)
   return (
     <dl className="config-view">
       <div className="config-row">
-        <dt className={changed(config.state_template, previous?.state_template) ? 'changed' : ''}>state template</dt>
-        <dd>{config.state_template}</dd>
+        <dt className={changed(state, previous && stateText(previous.state_template)) ? 'changed' : ''}>state template</dt>
+        <dd>
+          {state}
+          {config.serp_results != null && ` (top ${config.serp_results} search results)`}
+        </dd>
       </div>
       <div className="config-row">
         <dt className={changed(config.instructions, previous?.instructions) ? 'changed' : ''}>instructions</dt>
@@ -105,6 +137,18 @@ function ConfigView({ config, previous }: { config: PromptConfig; previous?: Pro
           <dd>{config.criteria[label]}</dd>
         </div>
       ))}
+      {config.model && (
+        <div className="config-row fixed">
+          <dt>Laya checkpoint</dt>
+          <dd>{config.model}</dd>
+        </div>
+      )}
+      {config.label_bias && (
+        <div className="config-row fixed">
+          <dt>label bias (fitted)</dt>
+          <dd>{LABELS.map((label) => `${label} ${(config.label_bias?.[label] ?? 0).toFixed(1)}`).join(' · ')}</dd>
+        </div>
+      )}
     </dl>
   )
 }
@@ -117,14 +161,19 @@ export default function KarpathyLoop() {
     total_golden_data: 0,
   })
   const [versions, setVersions] = useState<ModelVersion[]>([])
+  const [options, setOptions] = useState<LoopOptions | null>(null)
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [run, setRun] = useState<Run | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
-  const [sampleSize, setSampleSize] = useState(200)
+  const [sampleSize, setSampleSize] = useState(400)
   const [numLoops, setNumLoops] = useState(10)
   const [startVersion, setStartVersion] = useState('v1_baseline')
+  const [layaModel, setLayaModel] = useState('typed-decisions')
+  const [metric, setMetric] = useState('balanced')
+  const [calibrate, setCalibrate] = useState(true)
+  const [useSerp, setUseSerp] = useState(false)
   const [activeLLM, setActiveLLM] = useState('')
   const [expanded, setExpanded] = useState<number | null>(null)
   const [newModelName, setNewModelName] = useState('')
@@ -135,6 +184,7 @@ export default function KarpathyLoop() {
 
   useEffect(() => {
     axios.get(`${API}/golden-data/stats`).then((res) => setStats(res.data)).catch((err) => console.error('Failed to load stats:', err))
+    axios.get(`${API}/karpathy-loop/options`).then((res) => setOptions(res.data)).catch((err) => console.error('Failed to load options:', err))
     loadVersions()
     // Reattach to a loop that is already running on the server.
     loadRuns().then((activeId) => {
@@ -190,6 +240,10 @@ export default function KarpathyLoop() {
         loops: numLoops,
         sample_size: sampleSize,
         start_version: startVersion,
+        laya_model: layaModel,
+        metric,
+        calibrate,
+        use_serp: useSerp,
       })
       setRun(res.data)
     } catch (err) {
@@ -236,7 +290,13 @@ export default function KarpathyLoop() {
     return run.baseline_config
   }
 
-  const devGain = run?.baseline && run.best_accuracy != null ? run.best_accuracy - run.baseline.accuracy : null
+  // Older runs were scored by accuracy alone.
+  const scoreOf = (m: { score?: number | null; accuracy: number | null } | null | undefined) => m?.score ?? m?.accuracy ?? null
+  const baselineScore = scoreOf(run?.baseline)
+  const bestScore = run ? run.best_score ?? run.best_accuracy : null
+  const gain = baselineScore != null && bestScore != null ? bestScore - baselineScore : null
+  const objectiveLabel = (run?.metric && options?.metrics[run.metric]) || 'accuracy'
+  const keepConfidence = options?.keep_confidence ?? 0.8
 
   return (
     <div className="karpathy-loop">
@@ -244,8 +304,8 @@ export default function KarpathyLoop() {
         <h2>Karpathy Loop - Prompt Autoresearch</h2>
         <p className="description">
           An LLM rewrites the text Laya is given (state template, question instructions, label descriptions). Each
-          proposal is scored on a dev set of golden queries and kept only if accuracy improves. A holdout set the LLM
-          never sees is scored at the end.
+          proposal is scored on a dev set of golden queries and kept only if it beats the current best by more than
+          noise. Queries the LLM never sees are scored at the end.
         </p>
 
         <div className="golden-data-summary">
@@ -279,7 +339,7 @@ export default function KarpathyLoop() {
               id="sample-size"
               type="number"
               value={sampleSize}
-              onChange={(e) => setSampleSize(Math.max(20, Math.min(10000, parseInt(e.target.value) || 200)))}
+              onChange={(e) => setSampleSize(Math.max(20, Math.min(10000, parseInt(e.target.value) || 400)))}
               disabled={running}
               min="20"
               max="10000"
@@ -311,6 +371,47 @@ export default function KarpathyLoop() {
             </select>
           </div>
 
+          <div className="control-group">
+            <label htmlFor="laya-model">Laya Checkpoint:</label>
+            <select id="laya-model" value={layaModel} onChange={(e) => setLayaModel(e.target.value)} disabled={running}>
+              {(options?.laya_models ?? [layaModel]).map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="control-group">
+            <label htmlFor="metric">Objective:</label>
+            <select id="metric" value={metric} onChange={(e) => setMetric(e.target.value)} disabled={running}>
+              {Object.entries(options?.metrics ?? { [metric]: metric }).map(([key, label]) => (
+                <option key={key} value={key}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div className="loop-toggles">
+          <label>
+            <input type="checkbox" checked={calibrate} onChange={(e) => setCalibrate(e.target.checked)} disabled={running} />
+            Calibrate label bias on the dev set (stops one label swallowing every prediction)
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={useSerp}
+              onChange={(e) => setUseSerp(e.target.checked)}
+              disabled={running || !options?.serp_available}
+            />
+            Let the LLM add search-result context to the input
+            {options && !options.serp_available ? ' (data/test_db.json not found)' : ' (only golden queries have it; live predictions will not)'}
+          </label>
+        </div>
+
+        <div className="loop-controls">
           {running ? (
             <button onClick={stopRun} className="stop-loop-btn">
               Stop After This Round
@@ -335,8 +436,10 @@ export default function KarpathyLoop() {
           </div>
           <p className="run-meta">
             {run.llm.provider}
-            {run.llm.model ? ` · ${run.llm.model}` : ''} · started from {run.start_version} · {run.dev_size} dev /{' '}
-            {run.holdout_size} holdout queries
+            {run.llm.model ? ` · ${run.llm.model}` : ''} · started from {run.start_version}
+            {run.laya_model ? ` · Laya ${run.laya_model}` : ''} · objective: {objectiveLabel}
+            {run.calibrate ? ' · calibrated' : ''}
+            {run.use_serp ? ' · SERP context allowed' : ''} · {run.dev_size} dev / {run.holdout_size} holdout queries
           </p>
 
           {running && (
@@ -354,28 +457,36 @@ export default function KarpathyLoop() {
 
           <div className="results-summary">
             <div className="result-card">
-              <label>Baseline (dev)</label>
-              <div className="metric-value">{pct(run.baseline?.accuracy)}</div>
+              <label>Dev Score: Baseline → Best</label>
+              <div className="metric-value small">{arrow(baselineScore, bestScore)}</div>
+              <div className={`metric-note ${gain != null && gain > 0 ? 'positive' : ''}`}>{gain == null ? '' : signedPts(gain)}</div>
             </div>
             <div className="result-card">
-              <label>Best (dev)</label>
-              <div className="metric-value">{pct(run.best_accuracy)}</div>
+              <label>Dev Accuracy</label>
+              <div className="metric-value small">{arrow(run.baseline?.accuracy, run.best_accuracy)}</div>
+              {run.calibrate && run.baseline?.raw_accuracy != null && (
+                <div className="metric-note">baseline uncalibrated: {pct(run.baseline.raw_accuracy)}</div>
+              )}
             </div>
             <div className="result-card">
-              <label>Dev Gain</label>
-              <div className={`metric-value ${devGain != null && devGain > 0 ? 'positive' : 'neutral'}`}>
-                {devGain == null ? '-' : signedPts(devGain)}
-              </div>
+              <label>Dev Macro-F1</label>
+              <div className="metric-value small">{arrow(run.baseline?.macro_f1, run.best_macro_f1 ?? null)}</div>
             </div>
             <div className="result-card">
               <label>Best Round</label>
-              <div className="metric-value">{run.best_iteration === 0 ? 'baseline' : `${run.best_iteration}/${run.loops}`}</div>
+              <div className="metric-value small">{run.best_iteration === 0 ? 'baseline' : `${run.best_iteration} of ${run.loops}`}</div>
             </div>
             <div className="result-card">
-              <label>Holdout: Baseline → Best</label>
+              <label>Holdout Score: Baseline → Best</label>
               <div className="metric-value small">
-                {run.holdout ? `${pct(run.holdout.baseline.accuracy)} → ${pct(run.holdout.best.accuracy)}` : 'scored at the end'}
+                {run.holdout ? arrow(scoreOf(run.holdout.baseline), scoreOf(run.holdout.best)) : 'scored at the end'}
               </div>
+              {run.holdout && (
+                <div className="metric-note">
+                  accuracy {arrow(run.holdout.baseline.accuracy, run.holdout.best.accuracy)}
+                  {run.holdout.p_better != null && ` · P(better) ${run.holdout.p_better.toFixed(2)}`}
+                </div>
+              )}
             </div>
           </div>
 
@@ -389,8 +500,10 @@ export default function KarpathyLoop() {
                   <tr>
                     <th>Round</th>
                     <th>Result</th>
-                    <th>Dev Accuracy</th>
+                    <th>Score</th>
                     <th>vs Best</th>
+                    <th>Accuracy</th>
+                    <th>Macro-F1</th>
                     <th>Hypothesis</th>
                   </tr>
                 </thead>
@@ -408,21 +521,33 @@ export default function KarpathyLoop() {
                         <td>
                           <span className={`status-badge ${iter.status}`}>{iter.status}</span>
                         </td>
-                        <td>{pct(iter.accuracy)}</td>
+                        <td>{pct(scoreOf(iter))}</td>
                         <td>
                           {iter.delta_vs_best != null && (
                             <span
                               className={`accuracy-change ${iter.delta_vs_best > 0 ? 'positive' : iter.delta_vs_best < 0 ? 'negative' : 'neutral'}`}
+                              title={iter.p_better != null ? `Probability this is a real improvement: ${iter.p_better.toFixed(2)}` : undefined}
                             >
                               {signedPts(iter.delta_vs_best)}
+                              {iter.p_better != null && ` · P ${iter.p_better.toFixed(2)}`}
                             </span>
                           )}
                         </td>
+                        <td>{pct(iter.accuracy)}</td>
+                        <td>{pct(iter.macro_f1)}</td>
                         <td className="hypothesis">{iter.status === 'crash' ? iter.error : iter.hypothesis}</td>
                       </tr>
                       {expanded === iter.iteration && iter.config && (
                         <tr className="iteration-detail">
-                          <td colSpan={5}>
+                          <td colSpan={7}>
+                            {iter.predicted_counts && (
+                              <p className="control-hint">Predicted labels: {countsText(iter.predicted_counts)}</p>
+                            )}
+                            {iter.status === 'discard' && iter.delta_vs_best != null && iter.delta_vs_best > 0 && (
+                              <p className="warning-line">
+                                Scored higher, but the gain is within noise (needs P ≥ {keepConfidence}), so it was discarded.
+                              </p>
+                            )}
                             <p className="control-hint">Proposed prompt. Highlighted fields differ from the best prompt at the time.</p>
                             <ConfigView config={iter.config} previous={bestBefore(index)} />
                             {iter.warnings.map((w) => (
@@ -466,7 +591,7 @@ export default function KarpathyLoop() {
 
           {!running && !run.improved && run.status !== 'failed' && (
             <div className="section no-improvement">
-              <p>No proposal beat the starting prompt on the dev set in this run.</p>
+              <p>No proposal beat the starting prompt on the dev set by more than noise in this run.</p>
             </div>
           )}
 
@@ -490,7 +615,8 @@ export default function KarpathyLoop() {
                 <th>Status</th>
                 <th>LLM</th>
                 <th>Rounds</th>
-                <th>Dev: Baseline → Best</th>
+                <th>Dev Accuracy: Baseline → Best</th>
+                <th>Dev Macro-F1: Baseline → Best</th>
               </tr>
             </thead>
             <tbody>
@@ -507,9 +633,8 @@ export default function KarpathyLoop() {
                   <td>
                     {r.completed_iterations}/{r.loops}
                   </td>
-                  <td>
-                    {pct(r.baseline_accuracy)} → {pct(r.best_accuracy)}
-                  </td>
+                  <td>{arrow(r.baseline_accuracy, r.best_accuracy)}</td>
+                  <td>{arrow(r.baseline_macro_f1, r.best_macro_f1)}</td>
                 </tr>
               ))}
             </tbody>
@@ -545,7 +670,7 @@ export default function KarpathyLoop() {
             <div className="step-number">4</div>
             <div>
               <strong>Keep or Discard</strong>
-              <p>Higher accuracy becomes the new best. Anything else is discarded and logged</p>
+              <p>A gain that is larger than noise becomes the new best. Anything else is discarded and logged</p>
             </div>
           </div>
           <div className="step">

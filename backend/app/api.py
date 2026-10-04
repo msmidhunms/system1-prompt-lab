@@ -7,13 +7,14 @@ from datetime import datetime
 from typing import Optional
 import uuid
 
-from app import karpathy_loop, llm
+from app import karpathy_loop, llm, serp
 from app.database import get_db, PredictionRecord, FeedbackRecord, ModelVersion
 from app.tasks.intent.labels import SearchIntent
 from app.inference import classify_intent, classify_intent_v2
 from app.laya_inference import (
     BASELINE_VERSION,
     DEFAULT_CONFIG,
+    LAYA_MODELS,
     checkpoint_path,
     classify_with_laya,
     load_version_config,
@@ -44,9 +45,13 @@ class FeedbackRequest(BaseModel):
 
 class KarpathyLoopRequest(BaseModel):
     loops: int = 10
-    sample_size: int = 200
+    sample_size: int = 400
     seed: int = 42
     start_version: str = BASELINE_VERSION
+    metric: str = "balanced"
+    calibrate: bool = True
+    use_serp: bool = False
+    laya_model: str = "typed-decisions"
 
 
 class SaveModelRequest(BaseModel):
@@ -293,11 +298,26 @@ def start_karpathy_loop(request: KarpathyLoopRequest, db: Session = Depends(get_
             seed=request.seed,
             start_config=start_config,
             start_version=request.start_version,
+            metric=request.metric,
+            calibrate=request.calibrate,
+            use_serp=request.use_serp,
+            laya_model=request.laya_model,
         )
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/karpathy-loop/options")
+def get_karpathy_options():
+    """Choices for the run settings: objectives, Laya checkpoints, and whether SERP data is on disk."""
+    return {
+        "metrics": karpathy_loop.METRICS,
+        "laya_models": LAYA_MODELS,
+        "serp_available": serp.available(),
+        "keep_confidence": karpathy_loop.KEEP_CONFIDENCE,
+    }
 
 
 @router.get("/karpathy-loop/runs")
@@ -438,6 +458,7 @@ async def save_model(
         "best_iteration": run["best_iteration"],
         "base_version": run["start_version"],
         "dev_accuracy": run["best_accuracy"],
+        "dev_macro_f1": run.get("best_macro_f1"),
         "holdout_accuracy": run["holdout"]["best"]["accuracy"] if run.get("holdout") else None,
         "llm": run["llm"],
         "saved_at": datetime.utcnow().isoformat(),
