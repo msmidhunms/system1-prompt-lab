@@ -7,8 +7,9 @@ descriptions) instead of a training script:
     propose a change (LLM) -> evaluate on the dev set -> keep if accuracy
     improved, otherwise discard -> repeat.
 
-The LLM only ever sees dev examples. A holdout split is scored once at the end
-for the baseline and the best config. Every run writes its state, per-iteration
+The LLM only ever sees dev examples. A holdout split (EVAL_HOLDOUT_RATIO of all
+golden data, never sampled into dev) is scored once at the end for the baseline
+and the best config. Every run writes its state, per-iteration
 checkpoints and prompts under autoresearch/runs/<run_id>/, and appends one line
 per experiment to autoresearch/results.tsv.
 """
@@ -73,12 +74,12 @@ Reply with a single JSON object and nothing else:
 def split_examples(
     examples: List[Dict[str, str]], sample_size: int, seed: int
 ) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
-    """Seeded shuffle, take sample_size, and split off the holdout set."""
+    """Seeded shuffle, reserve the holdout share of all data, sample the dev set from the rest."""
     shuffled = sorted(examples, key=lambda e: e["query"])
     random.Random(seed).shuffle(shuffled)
-    sample = shuffled[:sample_size]
-    holdout_size = max(1, round(len(sample) * EVAL_HOLDOUT_RATIO))
-    return sample[holdout_size:], sample[:holdout_size]
+    holdout_size = max(1, round(len(shuffled) * EVAL_HOLDOUT_RATIO))
+    holdout, rest = shuffled[:holdout_size], shuffled[holdout_size:]
+    return rest[:sample_size], holdout
 
 
 def evaluate(config: Dict[str, Any], examples: List[Dict[str, str]]) -> Dict[str, Any]:
