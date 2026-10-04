@@ -215,6 +215,8 @@ export default function Compare() {
           <p className="small muted" style={{ padding: '4px 16px 12px' }}>
             Time is the scoring only, on this machine, after the model has loaded. Accuracy on {selected.sample_size} rows has a margin of
             roughly ±{(100 / Math.sqrt(selected.sample_size)).toFixed(0)} points, so small gaps between models are not meaningful.
+            A prompt written for one model can suit another badly: a model that scores near chance here usually needs its
+            own wording (shorter label descriptions, a hypothesis template), which the Prompt Optimizer can find for it.
           </p>
         </Card>
       )}
