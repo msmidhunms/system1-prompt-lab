@@ -1,5 +1,6 @@
 {
-  "name": "system1-experiments-frontend",
+  "name": "system1-prompt-lab-frontend",
+  "description": "Web app of System 1 Prompt Lab",
   "private": true,
   "version": "0.1.0",
   "type": "module",

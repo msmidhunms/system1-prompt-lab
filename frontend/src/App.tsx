@@ -87,8 +87,8 @@ function Shell() {
     <div className="shell">
       <aside className="sidebar">
         <div className="brand">
-          System 1 Experiments
-          <span>Laya prompt lab</span>
+          System 1 Prompt Lab
+          <span>Evaluate, compare, optimize</span>
         </div>
         <div className="sidebar-heading">Examples</div>
         {tasks.map((t) => (
