@@ -1,6 +1,18 @@
-# System-1 Model Experiments
+# System 1 Prompt Lab
 
-An experiment harness for Laya, a fast non-autoregressive "System 1" classifier. Each **example** is a classification task with a golden dataset. For any example you can try single inputs, edit the golden dataset, manage prompt versions ("models"), evaluate them, and run the Prompt Optimizer, in which an LLM rewrites the prompt Laya is given and keeps only what scores better.
+A workbench for small, fast "System 1" classifiers: models that make a decision in one forward pass instead of generating text. It runs seven of them (Laya, Verdict, GLiClass, three DeBERTa NLI classifiers and ModernBERT-Instruct), all on a laptop CPU.
+
+These models are steered by a short prompt: a question and one description per label. The lab is for finding out how good a prompt is, on which model, and for making it better:
+
+- **Golden datasets** for eight classification tasks (support-ticket routing, prompt-injection detection, spam, toxicity, and more), editable in the app.
+- **Evaluation** of any prompt version, with per-label metrics, a confusion matrix and the most confident errors.
+- **Model comparison**: one prompt, the same sample, several models side by side on accuracy and speed.
+- **Prompt Optimizer**: an LLM rewrites the prompt, each proposal is scored, and only gains that are larger than noise are kept (Karpathy's autoresearch loop, applied to prompts instead of code).
+- **Model versions**: every improvement is saved, and prompts can be copied, edited and renamed.
+
+FastAPI and SQLite on the back, React on the front. The classifiers run locally; the only outside call is to the LLM that proposes prompts in the optimizer, and that can be a local one too (Ollama).
+
+Each **example** is a classification task with a golden dataset. For any example you can try single inputs, edit the golden dataset, manage prompt versions ("models"), evaluate them, compare models, and run the Prompt Optimizer.
 
 ## Examples
 
