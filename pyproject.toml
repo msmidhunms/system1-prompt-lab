@@ -3,9 +3,9 @@ requires = ["setuptools>=65.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "system1-experiments"
+name = "system1-prompt-lab"
 version = "0.1.0"
-description = "System-1 Model Experiments: SERP Intent Classification"
+description = "Workbench for small, fast System 1 classifiers: golden datasets, evaluation, model comparison and an LLM-driven prompt optimizer"
 requires-python = ">=3.10"
 authors = [
     {name = "Midhun M S"}
