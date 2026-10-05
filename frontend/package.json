@@ -2,6 +2,7 @@
   "name": "system1-prompt-lab-frontend",
   "description": "Web app of System 1 Prompt Lab",
   "private": true,
+  "license": "MIT",
   "version": "0.1.0",
   "type": "module",
   "scripts": {
