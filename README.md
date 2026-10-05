@@ -356,4 +356,6 @@ The tests use a throwaway database and run folder (`DB_PATH`, `DATA_DIR`, `AUTOR
 
 ## License
 
-(To be determined)
+The code in this repository is released under the [MIT License](LICENSE).
+
+The models and datasets it downloads are not part of this repository and keep their own licences; check each one's page on Hugging Face before using it commercially.
